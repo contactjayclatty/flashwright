@@ -55,11 +55,10 @@ pub(crate) fn decompress(input: &[u8]) -> Result<(RamdiskFormat, Vec<u8>), BootE
 }
 
 fn detect(input: &[u8]) -> Result<RamdiskFormat, BootError> {
-    if input.len() >= 2 && input[0] == 0x1f && input[1] == 0x8b {
+    if input.get(..2) == Some(&[0x1f, 0x8b]) {
         return Ok(RamdiskFormat::Gzip);
     }
-    if input.len() >= 4 {
-        let magic = u32::from_le_bytes([input[0], input[1], input[2], input[3]]);
+    if let Some(magic) = le_u32(input) {
         if magic == LZ4_LEGACY_MAGIC {
             return Ok(RamdiskFormat::Lz4Legacy);
         }
@@ -67,10 +66,15 @@ fn detect(input: &[u8]) -> Result<RamdiskFormat, BootError> {
             return Ok(RamdiskFormat::Lz4);
         }
     }
-    if input.len() >= 6 && &input[..6] == b"070701" {
+    if input.get(..6) == Some(b"070701".as_slice()) {
         return Ok(RamdiskFormat::Cpio);
     }
     Err(BootError::UnsupportedRamdisk)
+}
+
+fn le_u32(input: &[u8]) -> Option<u32> {
+    let bytes: [u8; 4] = input.get(..4)?.try_into().ok()?;
+    Some(u32::from_le_bytes(bytes))
 }
 
 fn gzip(input: &[u8]) -> Result<Vec<u8>, BootError> {
@@ -96,7 +100,8 @@ fn read_capped(reader: &mut impl Read) -> Result<Vec<u8>, BootError> {
         if out.len().saturating_add(read) > MAX_OUT {
             return Err(BootError::TooLarge);
         }
-        out.extend_from_slice(&buf[..read]);
+        let piece = buf.get(..read).ok_or(BootError::UnsupportedRamdisk)?;
+        out.extend_from_slice(piece);
     }
     Ok(out)
 }
@@ -138,7 +143,10 @@ fn lz4_legacy(input: &[u8]) -> Result<Vec<u8>, BootError> {
         if written == 0 || out.len().saturating_add(written) > MAX_OUT {
             return Err(BootError::TooLarge);
         }
-        out.extend_from_slice(&block_out[..written]);
+        let piece = block_out
+            .get(..written)
+            .ok_or(BootError::UnsupportedRamdisk)?;
+        out.extend_from_slice(piece);
         pos = data_end;
         blocks += 1;
     }

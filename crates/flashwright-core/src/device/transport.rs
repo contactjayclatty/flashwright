@@ -163,6 +163,15 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         (true, unchanged, server)
     }
 
+    fn armed_plan_hash(&self) -> String {
+        self.active
+            .lock()
+            .expect("armed run")
+            .as_ref()
+            .map(|run| run.plan_hash.clone())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn arm(&self, plan: &crate::token::ConfirmedPlan) {
         *self.active.lock().expect("armed run") = Some(ArmedRun {
             plan_hash: plan.plan_hash().to_string(),
@@ -173,8 +182,14 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
     }
 
     pub async fn run_read(&self, cmd: crate::cmd::ReadCmd) -> Result<RunResult, DeviceError> {
-        let rendered =
+        let mut rendered =
             crate::cmd::read_argv(&cmd).map_err(|err| DeviceError::Message(err.to_string()))?;
+        if let crate::cmd::ReadCmd::AdbHost(crate::cmd::AdbHostRead::Pull { dst_name, .. }) = &cmd {
+            let dest = pull_destination(self.armed_plan_hash(), dst_name.as_str())?;
+            if let Some(last) = rendered.args.last_mut() {
+                *last = dest;
+            }
+        }
         let budget = crate::timeouts::read_budget(&cmd);
         let program = self.program_for(rendered.tool);
         let command = CatalogueCommand::from_rendered(rendered);
@@ -211,6 +226,8 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
     }
 
     /// Remove the fixed work directory. This does not take a write token.
+    ///
+    /// A failed removal is tried once more. The second result is the one returned.
     pub(crate) async fn run_cleanup(
         &self,
         cmd: &crate::cmd::CleanupCmd,
@@ -219,9 +236,18 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
             crate::cmd::cleanup_argv(cmd).map_err(|err| DeviceError::Message(err.to_string()))?;
         let budget = crate::timeouts::cleanup_budget();
         let adb = self.adb.clone();
-        let command = CatalogueCommand::from_rendered(rendered);
-        self.run_tool(&adb, command, RunLimits::from_budget(&budget))
+        let command = CatalogueCommand::from_rendered(rendered.clone());
+        match self
+            .run_tool(&adb, command, RunLimits::from_budget(&budget))
             .await
+        {
+            Ok(result) if result.success_exit() => Ok(result),
+            _ => {
+                let command = CatalogueCommand::from_rendered(rendered);
+                self.run_tool(&adb, command, RunLimits::from_budget(&budget))
+                    .await
+            }
+        }
     }
 
     fn reverify_before_write(
@@ -943,6 +969,25 @@ fn deadline_outcome(mode: Option<Mode>, target: WaitTarget) -> WaitOutcome {
             _ => WaitOutcome::WrongMode { actual },
         },
     }
+}
+
+fn pull_destination(plan_hash: String, name: &str) -> Result<String, DeviceError> {
+    let segment = if plan_segment(&plan_hash) {
+        plan_hash
+    } else {
+        "unplanned".to_string()
+    };
+    let dir = std::env::temp_dir().join("flashwright-plan").join(segment);
+    std::fs::create_dir_all(&dir).map_err(|err| DeviceError::Message(err.to_string()))?;
+    Ok(dir.join(name).to_string_lossy().into_owned())
+}
+
+fn plan_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 80
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
 }
 
 fn command_failed(command: &str, result: &RunResult) -> DeviceError {

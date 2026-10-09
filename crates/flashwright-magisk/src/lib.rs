@@ -21,15 +21,18 @@ pub use gates::{
     MIN_CODE_FOR_LATE_SPL,
 };
 pub use image::{ExtractedBootImage, SyntheticInitBoot};
-pub use pc::{validate_patched_init_boot, PatchedCheck};
+pub use pc::{
+    accept_patch_pull, validate_patched_init_boot, PatchAcceptance, PatchPull, PatchedCheck,
+};
 pub use plan::{
-    components_from_extract, official_base_apk, plan_app_patch, AppPatchPlan, AppPatchRequest,
-    HostComponent,
+    components_from_extract, detection_log, official_base_apk, phone_version_code, plan_app_patch,
+    AppPatchPlan, AppPatchRequest, HostComponent,
 };
 
 use thiserror::Error;
 
 pub const HIDDEN_APP: &str = "Hidden or renamed Magisk app isn't supported yet";
+pub const MAGISK_PROVENANCE: &str = "The Magisk app is GPL-3.0 and is not shipped. Flashwright uses the copy already installed on the phone.";
 pub const OFFICIAL_PACKAGE: &str = flashwright_core::cmd::MAGISK_PACKAGE;
 const SCRIPT: &str = include_str!("fl_patch.sh");
 
@@ -55,6 +58,12 @@ pub enum MagiskError {
 
     #[error("This Magisk version is too old for this security patch.")]
     MagiskTooOld,
+
+    #[error("Magisk is not installed.")]
+    NotInstalled,
+
+    #[error("codePath rejected")]
+    CodePathRejected,
 
     #[error("{0}")]
     Message(String),
@@ -98,13 +107,22 @@ mod tests {
     #[test]
     fn hidden_app_writes_nothing() {
         let err = prepare_steps("package:com.example.hidden\n").unwrap_err();
-        assert_eq!(err.to_string(), HIDDEN_APP);
+        assert_eq!(err.to_string(), "Magisk is not installed.");
+        let hidden = prepare_steps("package:io.github.vvb2060.magisk\n").unwrap_err();
+        assert_eq!(hidden.to_string(), HIDDEN_APP);
+        let rejected =
+            prepare_steps("Package [com.topjohnwu.magisk]\n    codePath=/tmp/not-the-app\n")
+                .unwrap_err();
+        assert_eq!(rejected.to_string(), "codePath rejected");
         let ok = prepare_steps(
             "Package [com.topjohnwu.magisk]\n    codePath=/data/app/~~abc==/com.topjohnwu.magisk-xyz\n",
         )
         .unwrap();
         assert!(ok.contains(&PatchStep::RunPatchScript));
         assert!(ok.contains(&PatchStep::RemoveWorkDir));
+        let log = detection_log("package:com.example.hidden\n");
+        assert!(log.starts_with("section 17 detect:"));
+        assert!(log.contains("absent"));
     }
 
     #[test]
@@ -121,5 +139,12 @@ mod tests {
         assert!(script.contains("./boot_patch.sh"));
         assert!(script.contains("chmod 755"));
         assert!(!script.contains("[ -f\""));
+        assert!(script.contains("set -eu"));
+        assert!(script.contains("pipefail"));
+        assert!(script.contains("FL_COMPONENTS_OK"));
+        assert!(!script.contains("magiskboot sha1"));
+        let hashed = script.find("sha1sum").expect("stock sha1");
+        let patched = script.find("./boot_patch.sh").expect("boot_patch");
+        assert!(hashed < patched);
     }
 }

@@ -13,15 +13,27 @@ pub const MIN_CODE_FOR_LATE_SPL: u32 = 30_600;
 pub const LATE_SPL: &str = "2025-12-01";
 const HEADROOM: u64 = 64 * 1024 * 1024;
 
-/// Komodo always patches init_boot. A boot image is refused.
+/// The partition named in `devices.toml` is the one this phone patches.
 pub fn patch_partition(
     codename: &str,
     image: &dyn ExtractedBootImage,
 ) -> Result<Partition, MagiskError> {
-    if codename.eq_ignore_ascii_case(KOMODO) && image.partition() != Partition::InitBoot {
-        return Err(MagiskError::KomodoBoot);
+    let devices = DeviceTable::embedded().map_err(|err| MagiskError::Message(err.to_string()))?;
+    let Some(row) = devices.get(codename) else {
+        return Err(MagiskError::Message(format!("unknown device {codename}")));
+    };
+    if image.partition() != row.patch_partition {
+        if codename.eq_ignore_ascii_case(KOMODO) {
+            return Err(MagiskError::KomodoBoot);
+        }
+        let label = row.model.clone().unwrap_or_else(|| row.codename.clone());
+        return Err(MagiskError::Message(format!(
+            "{label} patches {}, not {}.",
+            row.patch_partition.fastboot_name(),
+            image.partition().fastboot_name()
+        )));
     }
-    Ok(image.partition())
+    Ok(row.patch_partition)
 }
 
 /// The LU0 / FIPS region is a hard block. Other region labels pass.
