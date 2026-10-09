@@ -118,6 +118,7 @@ pub struct Session<R: CommandRunner> {
 
 impl<R: CommandRunner + ToolInvoker + 'static> Session<R> {
     pub fn new(runner: Arc<R>) -> Result<Self, CoreError> {
+        crate::proc::keep_system_runner_linked();
         Self::with_config(runner, TransportConfig::production())
     }
 
