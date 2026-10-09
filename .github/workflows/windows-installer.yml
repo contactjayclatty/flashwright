@@ -57,6 +57,13 @@ jobs:
       - name: Build NSIS installer
         working-directory: apps/flashwright-gui
         run: npx tauri build --bundles nsis
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: flashwright-windows-installer
+          path: target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 14
       - name: Record installer size
         shell: pwsh
         run: |
