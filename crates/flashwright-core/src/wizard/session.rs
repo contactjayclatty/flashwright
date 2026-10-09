@@ -571,8 +571,13 @@ impl<R: CommandRunner> WizardSession<R> {
                 PlanStep::Read(_) | PlanStep::Cleanup(_) => None,
             })
             .collect();
-        let (plan, token) = mint_confirmed(&held.hash, &held.serial, &writes);
-        self.transport.arm(&plan);
+        let token = if writes.is_empty() {
+            None
+        } else {
+            let (plan, token) = mint_confirmed(&held.hash, &held.serial, &writes);
+            self.transport.arm(&plan);
+            Some(token)
+        };
         let trailing_cleanup = held
             .steps
             .iter()
@@ -588,7 +593,7 @@ impl<R: CommandRunner> WizardSession<R> {
         let mut lines = Vec::new();
         let mut failed: Option<CoreError> = None;
         for step in &held.steps[..split] {
-            match self.run_planned(&token, step).await {
+            match self.run_planned(token.as_ref(), step).await {
                 Ok(text) => lines.push(text),
                 Err(err) => {
                     failed = Some(err);
@@ -600,7 +605,7 @@ impl<R: CommandRunner> WizardSession<R> {
             self.transport.keep_last_pending(finally_writes);
         }
         for step in &held.steps[split..] {
-            match self.run_planned(&token, step).await {
+            match self.run_planned(token.as_ref(), step).await {
                 Ok(text) => lines.push(text),
                 Err(err) => {
                     if failed.is_none() {
@@ -621,7 +626,7 @@ impl<R: CommandRunner> WizardSession<R> {
 
     async fn run_planned(
         &mut self,
-        token: &crate::token::WriteToken,
+        token: Option<&crate::token::WriteToken>,
         step: &PlanStep,
     ) -> Result<String, CoreError> {
         if let PlanStep::Write(cmd) = step {
@@ -641,6 +646,9 @@ impl<R: CommandRunner> WizardSession<R> {
                 Ok(result.stdout_text())
             }
             PlanStep::Write(cmd) => {
+                let Some(token) = token else {
+                    return Err(rejected("A write step failed."));
+                };
                 let result = self.transport.run_write(token, cmd.clone()).await;
                 match result {
                     Ok(result) if write_ok(cmd, &result) => Ok(result.stdout_text()),
@@ -1591,7 +1599,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::cmd::{AdbHostWrite, DeviceSerial, FastbootWrite, ImageRef, RebootMode};
+    use crate::cmd::{
+        AdbHostRead, AdbHostWrite, DeviceSerial, FastbootWrite, ImageRef, ReadCmd, RebootMode,
+    };
     use crate::device::{Partition, Slot, TransportConfig};
     use crate::proc::{ScriptedResponse, ScriptedRunner};
     use crate::token::open_run_count;
@@ -1917,6 +1927,29 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("expired"));
         assert_eq!(session.phase(), Phase::Review);
+    }
+
+    #[tokio::test]
+    async fn an_empty_write_list_mints_no_token() {
+        let _gate = gate().await;
+        let runner = Arc::new(ScriptedRunner::new());
+        let name = if cfg!(windows) { "adb.exe" } else { "adb" };
+        runner.on(
+            name,
+            &["version"],
+            ScriptedResponse::ok("Android Debug Bridge"),
+        );
+        script_phone(&runner, "pixel1", komodo_props());
+        let mut session = session(Arc::clone(&runner), 1_000);
+        install_tools(session.transport());
+        let mut request = draft(false, 5_000);
+        request.steps = vec![PlanStep::Read(ReadCmd::AdbHost(AdbHostRead::Version))];
+        let preview = session.build_plan(request).await.unwrap();
+        let before = open_run_count();
+        let report = session.confirm_and_run(&preview.plan_hash).await.unwrap();
+        assert_eq!(report.lines.len(), 1);
+        assert_eq!(open_run_count(), before);
+        assert_eq!(session.phase(), Phase::Done);
     }
 
     fn komodo_serial() -> DeviceSerial {

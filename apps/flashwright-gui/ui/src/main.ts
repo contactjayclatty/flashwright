@@ -32,6 +32,7 @@ class Wizard {
   private armTimer = 0;
   private overlay: ShellModel["overlay"] = "none";
   private stopAsk = false;
+  private stopFocus = false;
   private localError: string | null = null;
   private readonly themeError: string | null = themeReady()
     ? null
@@ -129,10 +130,15 @@ class Wizard {
       mountLog(host, model.lines);
     }
     this.markBackground(root);
-    if (this.confirmFocus || this.stopAsk) {
+    if (this.confirmFocus) {
       this.confirmFocus = false;
       window.requestAnimationFrame(() => {
         document.querySelector<HTMLButtonElement>(".fw-dialog .fw-btn--default")?.focus();
+      });
+    } else if (this.stopFocus) {
+      this.stopFocus = false;
+      window.requestAnimationFrame(() => {
+        document.querySelector<HTMLButtonElement>("[data-action='cancel-stop']")?.focus();
       });
     }
   }
@@ -348,7 +354,10 @@ class Wizard {
         this.render();
         break;
       case "cancel-job":
+        this.playing = false;
+        window.clearTimeout(this.playTimer);
         this.stopAsk = true;
+        this.stopFocus = true;
         this.render();
         break;
       case "stop-confirm":
@@ -463,7 +472,11 @@ class Wizard {
       const action = { b: "back", n: "next", h: "help", d: "dry-run", l: "log" }[key];
       if (key === "c") {
         event.preventDefault();
-        const cancel = document.querySelector<HTMLButtonElement>("[data-action='cancel-dialog'], [data-action='cancel-job'], [data-action='close-overlay']");
+        const cancel =
+          document.querySelector<HTMLButtonElement>("[data-action='cancel-stop']") ??
+          document.querySelector<HTMLButtonElement>("[data-action='cancel-dialog']") ??
+          document.querySelector<HTMLButtonElement>("[data-action='cancel-job']") ??
+          document.querySelector<HTMLButtonElement>("[data-action='close-overlay']");
         cancel?.click();
         return;
       }
@@ -508,16 +521,20 @@ class Wizard {
       }
     }
     if (event.key === "Escape") {
-      const cancel = document.querySelector<HTMLButtonElement>(
-        "[data-action='cancel-dialog'], [data-action='cancel-stop'], [data-action='close-overlay']",
-      );
+      const cancel =
+        document.querySelector<HTMLButtonElement>("[data-action='cancel-stop']") ??
+        document.querySelector<HTMLButtonElement>("[data-action='cancel-dialog']") ??
+        document.querySelector<HTMLButtonElement>("[data-action='close-overlay']");
       if (cancel) {
         cancel.click();
         return;
       }
       if (this.playing || this.visiblePhase() === "flash") {
         event.preventDefault();
+        this.playing = false;
+        window.clearTimeout(this.playTimer);
         this.stopAsk = true;
+        this.stopFocus = true;
         this.render();
       }
     }

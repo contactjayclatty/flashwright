@@ -46,6 +46,12 @@ mod phase1 {
                 "{command} is not a handler"
             );
         }
+        assert!(shell.contains("async fn pick_firmware("));
+        assert!(shell.contains("async fn tools_pick_folder("));
+        assert!(shell.contains("async fn tools_import_zip("));
+        assert!(shell.contains(".pick_file("));
+        assert!(shell.contains(".pick_folder("));
+        assert!(!shell.contains("blocking_pick"));
         for dropped in [
             "backup_verify",
             "backup_pin",

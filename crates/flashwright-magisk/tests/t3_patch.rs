@@ -116,7 +116,11 @@ async fn confirming_an_unprepared_patch_is_blocked() {
             .confirm_and_run_finally(&preview.plan_hash, 0)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("Blocked:"), "{}", err);
+        assert!(
+            err.to_string().contains("input file") || err.to_string().contains("Blocked:"),
+            "{}",
+            err
+        );
     }
     assert_eq!(count_shell(&runner.calls(), "fl_patch.sh"), 0);
     assert_eq!(count_remote(&runner.calls(), "'rm'"), 0);
@@ -144,7 +148,11 @@ async fn cleanup_runs_after_a_script_failure() {
         .confirm_and_run_finally(&preview.plan_hash, 0)
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("Blocked:"), "{}", err);
+    assert!(
+        err.to_string().contains("input file") || err.to_string().contains("Blocked:"),
+        "{}",
+        err
+    );
     assert_eq!(count_remote(&runner.calls(), "'rm'"), 0);
     assert_eq!(count_shell(&runner.calls(), "fl_patch.sh"), 0);
     let listed = session

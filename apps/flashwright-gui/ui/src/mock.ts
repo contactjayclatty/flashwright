@@ -19,7 +19,10 @@ export const FIXTURE_FACTORY_NAME = "harbor-ab12cd34-factory.zip";
 export const PRIMARY_SERIAL = "FWMOCK000001";
 
 const OTA_HASH = "flp1-5d7c6d3d4be43d94c6c9e09e774cc2cfbc70df5053d86b97f01719105a6015b6";
+const OTA_REAL = "flp1-a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
 const FACTORY_HASH = "flp1-f8c1f9e13a6c822320af19636431ecebebd4942bb0ecbcc700290d5a31d2f480";
+const FACTORY_REAL = "flp1-b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff0011";
+const PATCH_HASH = "flp1-c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff001122";
 
 const LINKS = [
   { id: "platform_tools", label: "Open the official platform-tools page" },
@@ -127,9 +130,12 @@ export class MockEngine implements EngineApi {
   private actionChosen = false;
   private route: Route = "ota";
   private preferDryRun = true;
+  private issuedDry = true;
+  private afterDry: string | null = null;
   private planKind = "update_keep_root";
   private firmwareName = "";
   private firmwareOk = false;
+  private patchedReady = false;
   private notice: Notice | null = null;
   private job: JobView = idleJob();
   private failedGates: GateView[] = [];
@@ -192,6 +198,7 @@ export class MockEngine implements EngineApi {
         : null;
     return Promise.resolve({
       phase: this.phase,
+      review_kind: this.phase === "review" ? this.planKind : null,
       tools: {
         version: "37.0.1",
         classification: "allow",
@@ -226,7 +233,7 @@ export class MockEngine implements EngineApi {
             sha256: FIXTURE_SHA256,
             codename: "harbor",
             build_id: "HQ1A.MOCK.002",
-            patched_ready: true,
+            patched_ready: this.patchedReady,
             partition: "init_boot",
           }
         : null,
@@ -271,13 +278,17 @@ export class MockEngine implements EngineApi {
   }
 
   async preparePatch(firmwareId: string): Promise<Snapshot> {
+    if (this.phase !== "firmware") {
+      throw new Error("A plan can only be confirmed from the review step.");
+    }
     if (!this.firmwareOk || firmwareId !== "fw-harbor") {
       this.notice = { level: "block", message: "Check a package before preparing a patch.", gates: [] };
       return this.snapshot();
     }
     this.phase = "review";
     this.planKind = "prepare_patch";
-    this.preferDryRun = false;
+    this.issuedDry = false;
+    this.afterDry = null;
     this.notice = null;
     return this.snapshot();
   }
@@ -299,12 +310,19 @@ export class MockEngine implements EngineApi {
   }
 
   async restorePlan(setId: string, item: string): Promise<Snapshot> {
+    if (this.phase === "flash" || this.phase === "done") {
+      throw new Error("A plan can only be confirmed from the review step.");
+    }
     if (setId !== "4f2a9c01-0000-7000-8000-000000000001" || item.length === 0) {
       throw new Error("That backup is not available.");
     }
+    this.phase = "review";
+    this.planKind = "restore_stock";
+    this.issuedDry = false;
+    this.afterDry = null;
     this.notice = {
       level: "info",
-      message: "Restore still needs its own review and confirm.",
+      message: `Restore of ${item} still needs its own review and confirm.`,
       gates: [],
     };
     return this.snapshot();
@@ -313,6 +331,7 @@ export class MockEngine implements EngineApi {
   async selectDevice(serial: string): Promise<Snapshot> {
     this.selected = serial;
     this.firmwareOk = false;
+    this.patchedReady = false;
     this.job = idleJob();
     if (serial === "FWMOCK000002") {
       this.notice = {
@@ -410,6 +429,7 @@ export class MockEngine implements EngineApi {
     this.route = name.includes("factory") ? "factory_keep_data" : "ota";
     this.firmwareName = name;
     this.firmwareOk = true;
+    this.patchedReady = false;
     this.failedGates = [];
     this.notice = null;
     return this.snapshot();
@@ -422,6 +442,8 @@ export class MockEngine implements EngineApi {
     }
     this.phase = "review";
     this.planKind = "update_keep_root";
+    this.issuedDry = this.preferDryRun;
+    this.afterDry = null;
     this.job = idleJob();
     this.notice = null;
     return this.snapshot();
@@ -432,6 +454,16 @@ export class MockEngine implements EngineApi {
     if (!plan || plan.plan_hash !== planHash) {
       throw new Error("The dry run hash does not match the plan this program issued.");
     }
+    if (!plan.dry_run) {
+      throw new Error("That plan is not a dry run.");
+    }
+    this.afterDry = plan.plan_hash;
+    this.issuedDry = false;
+    this.notice = {
+      level: "info",
+      message: "The plan code changed for the real flash.",
+      gates: [],
+    };
     this.job = {
       state: "dry_done",
       progress: 100,
@@ -448,7 +480,6 @@ export class MockEngine implements EngineApi {
       recovery: [],
       cancel_mode: "immediate",
     };
-    this.notice = null;
     return this.snapshot();
   }
 
@@ -456,6 +487,24 @@ export class MockEngine implements EngineApi {
     const plan = this.plan();
     if (!plan || plan.plan_hash !== planHash) {
       throw new Error("That plan code was not issued by Flashwright.");
+    }
+    if (plan.dry_run) {
+      throw new Error("A dry-run plan does not write.");
+    }
+    if (plan.kind === "prepare_patch") {
+      this.patchedReady = true;
+      this.phase = "firmware";
+      this.job = {
+        state: "succeeded",
+        progress: 100,
+        status_line: "Patch ready",
+        lines: plan.steps.map((step) => ({ ts: "13:41:02", level: "run", text: quote(step.argv) })),
+        result_title: "Patch ready",
+        result_body: "The patched image is ready. Nothing was flashed.",
+        recovery: [],
+        cancel_mode: "immediate",
+      };
+      return this.snapshot();
     }
     this.phase = "done";
     this.job = {
@@ -495,6 +544,9 @@ export class MockEngine implements EngineApi {
   }
 
   async cancel(): Promise<Snapshot> {
+    if (this.phase === "done") {
+      return this.snapshot();
+    }
     this.job = {
       ...this.job,
       state: "cancelled",
@@ -519,11 +571,22 @@ export class MockEngine implements EngineApi {
 
   private plan() {
     if (!this.firmwareOk) return null;
-    const hash = this.route === "factory_keep_data" ? FACTORY_HASH : OTA_HASH;
+    const dry = this.planKind === "update_keep_root" && this.issuedDry;
+    const hash =
+      this.planKind === "prepare_patch"
+        ? PATCH_HASH
+        : this.route === "factory_keep_data"
+          ? dry
+            ? FACTORY_HASH
+            : FACTORY_REAL
+          : dry
+            ? OTA_HASH
+            : OTA_REAL;
     const eight = hash.slice(5, 13);
+    const prefix = dry ? "DRY" : "PLAN";
     return {
       plan_hash: hash,
-      plan_code: `PLAN ${eight.slice(0, 4)}·${eight.slice(4)}`,
+      plan_code: `${prefix} ${eight.slice(0, 4)}·${eight.slice(4)}`,
       expires_unix_ms: 1_760_000_000_000 + 15 * 60 * 1000,
       route: this.route,
       target_slot: "b" as const,
@@ -532,9 +595,9 @@ export class MockEngine implements EngineApi {
       backup_set_id: "4f2a9c01-0000-7000-8000-000000000001",
       gates: passGates(),
       steps: otaSteps(this.firmwareName || FIXTURE_OTA_NAME),
-      prefer_dry_run: this.preferDryRun,
+      dry_run: dry,
+      after_dry_run: this.afterDry,
       kind: this.planKind,
-      dry_run: false,
     };
   }
 
