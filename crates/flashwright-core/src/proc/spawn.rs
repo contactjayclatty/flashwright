@@ -15,11 +15,13 @@ use crate::exe::VerifiedExe;
 
 /// Build a child command. This is the single `Command::new` call site.
 #[allow(clippy::disallowed_methods)]
+#[allow(dead_code)] // called by the host runner; stable Rust marks that path unused
 pub(crate) fn command(program: &OsStr) -> tokio::process::Command {
     tokio::process::Command::new(program)
 }
 
 /// Remember the program and arguments that are about to be spawned.
+#[allow(dead_code)] // called by the host runner; stable Rust marks that path unused
 pub(crate) fn note_spawn(program: &std::path::Path, args: &[String]) {
     #[cfg(test)]
     {
@@ -63,6 +65,7 @@ thread_local! {
     static EXEC_TRACE: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
+#[allow(dead_code)] // called by the host runner; stable Rust marks that path unused
 pub(crate) fn command_for(exe: &VerifiedExe) -> tokio::process::Command {
     debug_assert!(exe.path().is_absolute());
     command(exe.path().as_os_str())

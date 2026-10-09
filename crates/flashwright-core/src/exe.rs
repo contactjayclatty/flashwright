@@ -45,6 +45,7 @@ impl VerifiedExe {
     }
 
     /// Real spawn accepts only a measured or allow-listed adb or fastboot.
+    #[allow(dead_code)] // called by the host runner; stable Rust marks that path unused
     pub(crate) fn admits_system_spawn(&self) -> bool {
         matches!(self.trust, Trust::Measured | Trust::AllowListed)
             && is_platform_tool(&file_name(&self.path))

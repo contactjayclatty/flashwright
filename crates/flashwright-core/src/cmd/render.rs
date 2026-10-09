@@ -58,6 +58,7 @@ impl CatalogueCommand {
         &self.args
     }
 
+    #[allow(dead_code)] // called by the host runner; stable Rust marks that path unused
     pub(crate) fn group(&self) -> crate::proc::ProcessGroup {
         self.group
     }
