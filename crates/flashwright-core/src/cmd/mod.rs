@@ -13,7 +13,7 @@ pub use newtypes::{
     AssetRef, ByNameRoot, ByteLen, CmdError, DeviceSerial, DumpsysService, FastbootVar, HostRef,
     ImageRef, PackageName, PropName, ValidatedDevicePath, WorkFile, MAGISK_PACKAGE,
 };
-pub use render::{read_argv, sh_quote, write_argv, Rendered, Tool};
+pub use render::{read_argv, sh_quote, write_argv, CatalogueCommand, Rendered, Tool};
 
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +34,8 @@ pub enum ReadCmd {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdbHostRead {
     Version,
+    KillServer,
+    StartServer,
     Devices,
     GetState {
         serial: DeviceSerial,
@@ -122,6 +124,7 @@ pub enum ExecOutSuRead {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FastbootRead {
+    Version,
     Devices,
     GetvarAll {
         serial: DeviceSerial,
@@ -195,14 +198,19 @@ pub enum FastbootWrite {
 impl ReadCmd {
     pub fn serial(&self) -> Option<&DeviceSerial> {
         match self {
-            Self::AdbHost(AdbHostRead::Version | AdbHostRead::Devices) => None,
+            Self::AdbHost(
+                AdbHostRead::Version
+                | AdbHostRead::KillServer
+                | AdbHostRead::StartServer
+                | AdbHostRead::Devices,
+            ) => None,
             Self::AdbHost(AdbHostRead::GetState { serial } | AdbHostRead::Pull { serial, .. }) => {
                 Some(serial)
             }
             Self::AdbShell(cmd) => Some(cmd.serial()),
             Self::Su(cmd) => Some(cmd.serial()),
             Self::ExecOutSu(ExecOutSuRead::CatBlock { serial, .. }) => Some(serial),
-            Self::Fastboot(FastbootRead::Devices) => None,
+            Self::Fastboot(FastbootRead::Version | FastbootRead::Devices) => None,
             Self::Fastboot(
                 FastbootRead::GetvarAll { serial } | FastbootRead::Getvar { serial, .. },
             ) => Some(serial),

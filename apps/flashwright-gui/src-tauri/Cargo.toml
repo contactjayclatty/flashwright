@@ -32,6 +32,8 @@ required-features = ["gui"]
 tauri-build = { version = "2", optional = true }
 
 [dependencies]
+# Lets the workspace clippy ban on tokio::process::Command::new resolve here.
+tokio = { workspace = true }
 flashwright-wizard = { path = "../../../crates/flashwright-wizard", optional = true }
 tauri = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
