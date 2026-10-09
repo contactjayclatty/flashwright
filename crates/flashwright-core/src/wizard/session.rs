@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-use crate::cmd::{DeviceSerial, ReadCmd, WriteCmd};
+use crate::cmd::{AdbShellWrite, CleanupCmd, DeviceSerial, ReadCmd, WriteCmd};
 use crate::device::{PlatformToolsTransport, Slot};
 use crate::parse::{self, Verdict};
 use crate::proc::CommandRunner;
@@ -80,6 +80,16 @@ impl Clock for FixedClock {
 pub enum PlanStep {
     Read(ReadCmd),
     Write(WriteCmd),
+    /// Core appends this step. It is covered by the plan hash and cannot write an image.
+    Cleanup(CleanupCmd),
+}
+
+/// Hash of one file the plan will push or check. Callers fill this from a file core opened.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ImageSeal {
+    pub role: String,
+    pub sha1: String,
+    pub sha256: String,
 }
 
 /// Firmware the operator selected. The phone identity is read from the device.
@@ -102,8 +112,9 @@ pub struct PlanRequest {
     pub dry_run: bool,
     pub steps: Vec<PlanStep>,
     pub firmware: FirmwareClaim,
-    pub finally_steps: usize,
     pub after_dry_run: Option<String>,
+    /// File bindings core hashes with the steps. A caller cannot choose the cleanup length.
+    pub images: Vec<ImageSeal>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,9 +207,9 @@ struct PlanBody<'a> {
     nonce: &'a str,
     dry_run: bool,
     expires_unix_ms: i64,
-    finally_steps: usize,
     after_dry_run: Option<&'a str>,
     steps: &'a [PlanStep],
+    images: &'a [ImageSeal],
     facts: Option<&'a FactSnap>,
     gates: &'a [GateSnap],
     backup: Option<&'a BackupSnap>,
@@ -227,7 +238,7 @@ struct HeldPlan {
     timeouts: Vec<TimeoutSnap>,
     acks: Vec<String>,
     files: Vec<InputFile>,
-    finally_steps: usize,
+    images: Vec<ImageSeal>,
     after_dry_run: Option<String>,
     life: PlanLife,
 }
@@ -329,6 +340,14 @@ impl<R: CommandRunner> WizardSession<R> {
             self.note_discard_input();
             return Err(err);
         }
+        if let Err(err) = check_images(&request.images) {
+            self.note_discard_input();
+            return Err(err);
+        }
+        if let Err(err) = ensure_cleanup(&mut request.steps) {
+            self.note_discard_input();
+            return Err(err);
+        }
         seal_image_sizes(&mut request.steps)?;
         let views = step_views(&request.steps)?;
         let facts = self.collect_facts(&request).await?;
@@ -374,7 +393,7 @@ impl<R: CommandRunner> WizardSession<R> {
             timeouts,
             acks,
             files,
-            finally_steps: request.finally_steps,
+            images: request.images,
             after_dry_run: request.after_dry_run.clone(),
             life: PlanLife::Issued,
         });
@@ -404,8 +423,8 @@ impl<R: CommandRunner> WizardSession<R> {
                 dry_run: held.dry_run,
                 steps: held.steps.clone(),
                 firmware: held.firmware.clone(),
-                finally_steps: held.finally_steps,
                 after_dry_run: held.after_dry_run.clone(),
+                images: held.images.clone(),
             }
         };
         self.safety = Some(self.collect_facts(&request).await?);
@@ -453,8 +472,8 @@ impl<R: CommandRunner> WizardSession<R> {
             dry_run: held.dry_run,
             steps: held.steps.clone(),
             firmware: held.firmware.clone(),
-            finally_steps: held.finally_steps,
             after_dry_run: held.after_dry_run.clone(),
+            images: held.images.clone(),
         };
         let expires = held.expires_unix_ms;
         let decisions = safety::evaluate_acked(
@@ -522,26 +541,23 @@ impl<R: CommandRunner> WizardSession<R> {
     }
 
     /// Run the reviewed plan once. The token never leaves this function.
+    ///
+    /// The step list, including cleanup, is the one core stored in the plan hash.
     pub async fn confirm_and_run(&mut self, plan_hash_value: &str) -> Result<RunReport, CoreError> {
-        self.confirm_and_run_finally(plan_hash_value, 0).await
+        self.confirm_and_run_finally(plan_hash_value).await
     }
 
-    /// Run a confirmed plan. The last `finally_steps` still run when an earlier step fails.
+    /// Run a confirmed plan. [`safety::evaluate_step`] runs before every write.
     ///
-    /// Safety gates are evaluated before a token is minted and again before each write.
+    /// A failed step stops later writes. Cleanup steps from the hashed plan still run.
     pub async fn confirm_and_run_finally(
         &mut self,
         plan_hash_value: &str,
-        finally_steps: usize,
     ) -> Result<RunReport, CoreError> {
         self.ready(plan_hash_value)?;
         let dry_run = self.held.as_ref().expect("plan").dry_run;
         if dry_run {
             return Err(rejected("A dry-run plan does not write."));
-        }
-        let planned_finally = self.held.as_ref().expect("plan").finally_steps;
-        if finally_steps != planned_finally {
-            return Err(rejected("The cleanup length does not match this plan."));
         }
         if let Some(prior) = self.held.as_ref().expect("plan").after_dry_run.clone() {
             if !self.used.contains(&prior) {
@@ -569,9 +585,6 @@ impl<R: CommandRunner> WizardSession<R> {
         if let Some(reason) = block_reason(&decisions) {
             return Err(rejected(format!("Blocked: {reason}")));
         }
-        if finally_steps > steps.len() {
-            return Err(rejected("Cleanup is longer than the plan."));
-        }
         let held = self.held.take().expect("review plan");
         let hash = held.hash.clone();
         self.consume(&hash);
@@ -581,37 +594,25 @@ impl<R: CommandRunner> WizardSession<R> {
             .iter()
             .filter_map(|step| match step {
                 PlanStep::Write(cmd) => Some(cmd.clone()),
-                PlanStep::Read(_) => None,
+                PlanStep::Read(_) | PlanStep::Cleanup(_) => None,
             })
             .collect();
         let (plan, token) = mint_confirmed(&held.hash, &held.serial, &writes);
         self.transport.arm(&plan);
-        let split = held.steps.len() - finally_steps;
-        let finally_writes = held.steps[split..]
-            .iter()
-            .filter(|step| matches!(step, PlanStep::Write(_)))
-            .count();
         let mut lines = Vec::new();
         let mut failed: Option<CoreError> = None;
-        for step in &held.steps[..split] {
+        for step in &held.steps {
+            if matches!(step, PlanStep::Cleanup(_)) {
+                self.run_cleanup_step(step, &mut failed, &mut lines).await;
+                continue;
+            }
+            if failed.is_some() {
+                continue;
+            }
             match self.run_planned(&token, step).await {
                 Ok(text) => lines.push(text),
                 Err(err) => {
                     failed = Some(err);
-                    break;
-                }
-            }
-        }
-        if failed.is_some() {
-            self.transport.keep_last_pending(finally_writes);
-        }
-        for step in &held.steps[split..] {
-            match self.run_planned(&token, step).await {
-                Ok(text) => lines.push(text),
-                Err(err) => {
-                    if failed.is_none() {
-                        failed = Some(err);
-                    }
                 }
             }
         }
@@ -622,6 +623,38 @@ impl<R: CommandRunner> WizardSession<R> {
         }
         self.phase = Phase::Done;
         Ok(RunReport { lines })
+    }
+
+    async fn run_cleanup_step(
+        &mut self,
+        step: &PlanStep,
+        failed: &mut Option<CoreError>,
+        lines: &mut Vec<String>,
+    ) {
+        let PlanStep::Cleanup(cmd) = step else {
+            if failed.is_none() {
+                *failed = Some(rejected("Cleanup steps cannot perform writes."));
+            }
+            return;
+        };
+        let blocks = safety::evaluate_step(
+            step,
+            self.safety.as_ref().map(safety::CollectedFacts::from_ref),
+        );
+        if let Some(gate) = blocks.first() {
+            if failed.is_none() {
+                *failed = Some(rejected(format!("Blocked: {} {}", gate.id, gate.reason)));
+            }
+            return;
+        }
+        match self.transport.run_cleanup(cmd).await {
+            Ok(result) if result.success_exit() => lines.push(result.stdout_text()),
+            Ok(_) | Err(_) => {
+                if failed.is_none() {
+                    *failed = Some(rejected("Cleanup failed."));
+                }
+            }
+        }
     }
 
     async fn run_planned(
@@ -641,8 +674,12 @@ impl<R: CommandRunner> WizardSession<R> {
         }
         match step {
             PlanStep::Read(cmd) => {
+                let pulled = matches!(cmd, ReadCmd::AdbHost(crate::cmd::AdbHostRead::Pull { .. }));
                 let result = self.transport.run_read(cmd.clone()).await?;
                 if !result.success_exit() {
+                    return Err(rejected("A read step failed."));
+                }
+                if pulled && parse::parse_pull(&result.stdout_text()) != Verdict::Ok {
                     return Err(rejected("A read step failed."));
                 }
                 Ok(result.stdout_text())
@@ -654,6 +691,7 @@ impl<R: CommandRunner> WizardSession<R> {
                     Ok(_) | Err(_) => Err(rejected("A write step failed.")),
                 }
             }
+            PlanStep::Cleanup(_) => Err(rejected("Cleanup steps cannot perform writes.")),
         }
     }
 
@@ -789,11 +827,81 @@ fn rejected(reason: impl Into<String>) -> CoreError {
     }
 }
 
+/// The cleanup suffix is fixed here and then hashed with the rest of the steps.
+fn ensure_cleanup(steps: &mut Vec<PlanStep>) -> Result<(), CoreError> {
+    let mut leading = Vec::new();
+    while matches!(steps.first(), Some(PlanStep::Cleanup(_))) {
+        leading.push(steps.remove(0));
+    }
+    let result = ensure_cleanup_tail(steps);
+    for (index, step) in leading.into_iter().enumerate() {
+        steps.insert(index, step);
+    }
+    result
+}
+
+fn ensure_cleanup_tail(steps: &mut Vec<PlanStep>) -> Result<(), CoreError> {
+    if let Some(index) = steps
+        .iter()
+        .position(|step| matches!(step, PlanStep::Cleanup(_)))
+    {
+        if steps[index..]
+            .iter()
+            .any(|step| !matches!(step, PlanStep::Cleanup(_)))
+        {
+            return Err(rejected("Cleanup steps cannot perform writes."));
+        }
+    }
+    let work_serial = steps.iter().find_map(|step| match step {
+        PlanStep::Write(WriteCmd::AdbShell(AdbShellWrite::MakeWorkDir { serial })) => {
+            Some(serial.clone())
+        }
+        _ => None,
+    });
+    let Some(serial) = work_serial else {
+        return Ok(());
+    };
+    let expected = PlanStep::Cleanup(CleanupCmd::RemoveWorkDir { serial });
+    match steps.last() {
+        Some(step) if step == &expected => {}
+        Some(PlanStep::Cleanup(_)) => {
+            return Err(rejected("Cleanup does not match the work directory."));
+        }
+        _ => steps.push(expected),
+    }
+    let count = steps
+        .iter()
+        .filter(|step| matches!(step, PlanStep::Cleanup(_)))
+        .count();
+    if count != 1 {
+        return Err(rejected("The plan has more than one cleanup step."));
+    }
+    Ok(())
+}
+
+fn check_images(images: &[ImageSeal]) -> Result<(), CoreError> {
+    for image in images {
+        if image.role.is_empty()
+            || image.role.len() > 64
+            || !hex_len(&image.sha1, 40)
+            || !hex_len(&image.sha256, 64)
+        {
+            return Err(rejected("The image binding is not valid."));
+        }
+    }
+    Ok(())
+}
+
+fn hex_len(value: &str, len: usize) -> bool {
+    value.len() == len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn check_serial(request: &PlanRequest) -> Result<(), CoreError> {
     for step in &request.steps {
         let serial = match step {
             PlanStep::Read(cmd) => cmd.serial().map(|serial| serial.as_str()),
             PlanStep::Write(cmd) => Some(cmd.serial().as_str()),
+            PlanStep::Cleanup(cmd) => Some(cmd.serial().as_str()),
         };
         if let Some(serial) = serial {
             if serial != request.serial {
@@ -815,6 +923,10 @@ fn step_views(steps: &[PlanStep]) -> Result<Vec<PlanStepView>, CoreError> {
             PlanStep::Write(cmd) => (
                 "write",
                 crate::cmd::write_argv(cmd).map_err(|err| rejected(err.to_string()))?,
+            ),
+            PlanStep::Cleanup(cmd) => (
+                "cleanup",
+                crate::cmd::cleanup_argv(cmd).map_err(|err| rejected(err.to_string()))?,
             ),
         };
         views.push(PlanStepView {
@@ -846,9 +958,9 @@ fn hash_plan(
         nonce,
         dry_run: request.dry_run,
         expires_unix_ms,
-        finally_steps: request.finally_steps,
         after_dry_run: request.after_dry_run.as_deref(),
         steps: &request.steps,
+        images: &request.images,
         facts,
         gates,
         backup,
@@ -949,6 +1061,7 @@ fn step_timeouts(steps: &[PlanStep]) -> Vec<TimeoutSnap> {
         .map(|step| {
             let budget = match step {
                 PlanStep::Read(cmd) => crate::timeouts::read_budget(cmd),
+                PlanStep::Cleanup(_) => crate::timeouts::cleanup_budget(),
                 PlanStep::Write(cmd) => {
                     let size = write_size(cmd);
                     crate::timeouts::write_budget(cmd, size, 1.0).unwrap_or(
@@ -1154,10 +1267,9 @@ fn image_path(step: &PlanStep) -> Option<&str> {
             package: image,
             ..
         })) => Some(image.path()),
-        PlanStep::Write(WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Push {
-            src: crate::cmd::HostRef::Image(image),
-            ..
-        })) => Some(image.path()),
+        PlanStep::Write(WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Push { src, .. })) => {
+            Some(src.path())
+        }
         _ => None,
     }
 }
@@ -1715,8 +1827,8 @@ mod tests {
                 mode: RebootMode::System,
             }))],
             firmware: FirmwareClaim::default(),
-            finally_steps: 0,
             after_dry_run: None,
+            images: Vec::new(),
         }
     }
 
@@ -1973,8 +2085,8 @@ mod tests {
                 image_spl: Some("2026-02-01".into()),
                 image_fingerprint: Some("synthetic/komodo/test".into()),
             },
-            finally_steps: 0,
             after_dry_run: None,
+            images: Vec::new(),
         }
     }
 
@@ -2145,7 +2257,11 @@ mod tests {
             hash_plan(&request, "n1", 5_000, None, &[], None, &[], &["G19".into()]).unwrap()
         );
         let mut counted = draft(false, 5_000);
-        counted.finally_steps = 1;
+        counted
+            .steps
+            .push(PlanStep::Cleanup(CleanupCmd::RemoveWorkDir {
+                serial: serial(),
+            }));
         assert_ne!(
             base,
             hash_plan(&counted, "n1", 5_000, None, &[], None, &[], &[]).unwrap()
@@ -2235,7 +2351,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_tail_runs_after_an_earlier_write_fails() {
+    async fn a_failed_write_does_not_run_a_later_write() {
         let _gate = gate().await;
         let runner = Arc::new(ScriptedRunner::new());
         script_phone(&runner, "pixel1", komodo_props());
@@ -2252,22 +2368,30 @@ mod tests {
         );
         install_tools(session.transport());
         let mut plan = draft(false, 5_000);
-        plan.finally_steps = 1;
         plan.steps
             .push(PlanStep::Write(WriteCmd::AdbHost(AdbHostWrite::Reboot {
                 serial: serial(),
                 mode: RebootMode::Bootloader,
             })));
+        plan.steps
+            .push(PlanStep::Cleanup(CleanupCmd::RemoveWorkDir {
+                serial: serial(),
+            }));
         let preview = session.build_plan(plan).await.unwrap();
+        assert!(preview.steps.iter().any(|step| step.class == "cleanup"));
         let err = session
-            .confirm_and_run_finally(&preview.plan_hash, 1)
+            .confirm_and_run(&preview.plan_hash)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("write step failed"));
+        assert!(err.to_string().contains("write step failed"), "{err}");
         assert!(runner
             .calls()
             .iter()
-            .any(|call| call.args.iter().any(|arg| arg == "bootloader")));
+            .all(|call| !call.args.iter().any(|arg| arg == "bootloader")));
+        assert!(runner
+            .calls()
+            .iter()
+            .any(|call| { call.args.iter().any(|arg| arg.contains("rm")) }));
         assert_eq!(session.phase(), Phase::Recovery);
     }
 
@@ -2456,19 +2580,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_count_is_part_of_the_plan() {
+    async fn cleanup_is_fixed_by_core_and_covered_by_the_hash() {
         let _gate = gate().await;
         let runner = Arc::new(ScriptedRunner::new());
         script_phone(&runner, "pixel1", komodo_props());
         let mut session = session(runner, 1_000);
         install_tools(session.transport());
-        let preview = session.build_plan(draft(false, 5_000)).await.unwrap();
-        let err = session
-            .confirm_and_run_finally(&preview.plan_hash, 1)
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("cleanup length"), "{err}");
-        assert_eq!(session.phase(), Phase::Review);
+        let mut plan = draft(false, 5_000);
+        plan.steps.insert(
+            0,
+            PlanStep::Write(WriteCmd::AdbShell(AdbShellWrite::MakeWorkDir {
+                serial: serial(),
+            })),
+        );
+        let preview = session.build_plan(plan).await.unwrap();
+        assert_eq!(preview.steps.last().map(|step| step.class), Some("cleanup"));
+        assert!(preview
+            .steps
+            .last()
+            .is_some_and(|step| step.argv.iter().any(|arg| arg.contains("rm"))));
     }
 
     #[tokio::test]

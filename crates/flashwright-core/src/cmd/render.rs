@@ -8,8 +8,9 @@
 //! double-quoted token. The only unquoted shell syntax is `| sha256sum`.
 
 use super::{
-    AdbHostRead, AdbHostWrite, AdbShellRead, AdbShellWrite, ByNameRoot, CmdError, DeviceSerial,
-    ExecOutSuRead, FastbootRead, FastbootWrite, ReadCmd, SuRead, SuWrite, WorkFile, WriteCmd,
+    AdbHostRead, AdbHostWrite, AdbShellRead, AdbShellWrite, ByNameRoot, CleanupCmd, CmdError,
+    DeviceSerial, ExecOutSuRead, FastbootRead, FastbootWrite, ReadCmd, SuRead, SuWrite, WorkFile,
+    WriteCmd,
 };
 use crate::device::{Partition, RebootTarget, Slot};
 
@@ -100,7 +101,7 @@ pub fn read_argv(cmd: &ReadCmd) -> Result<Rendered, CmdError> {
                 super::PullRemote::Work(file) => file.device_path(),
             };
             let mut args = serial_args(serial, &["pull", remote]);
-            args.push(dst_name.clone());
+            args.push(dst_name.as_str().to_string());
             args
         }
         ReadCmd::AdbShell(shell) => shell_remote(shell.serial_ref(), &render_shell(shell)?),
@@ -134,6 +135,17 @@ pub fn read_argv(cmd: &ReadCmd) -> Result<Rendered, CmdError> {
     Ok(Rendered { tool, args })
 }
 
+pub fn cleanup_argv(cmd: &CleanupCmd) -> Result<Rendered, CmdError> {
+    let CleanupCmd::RemoveWorkDir { serial } = cmd;
+    Ok(Rendered {
+        tool: Tool::Adb,
+        args: shell_remote(
+            serial,
+            &join_quoted(&["rm", "-rf", "/data/local/tmp/flashwright"]),
+        ),
+    })
+}
+
 pub fn write_argv(cmd: &WriteCmd) -> Result<Rendered, CmdError> {
     let args = match cmd {
         WriteCmd::AdbHost(AdbHostWrite::Push { serial, src, dst }) => {
@@ -148,10 +160,6 @@ pub fn write_argv(cmd: &WriteCmd) -> Result<Rendered, CmdError> {
         WriteCmd::AdbShell(AdbShellWrite::MakeWorkDir { serial }) => shell_remote(
             serial,
             &join_quoted(&["mkdir", "-p", "/data/local/tmp/flashwright/out"]),
-        ),
-        WriteCmd::AdbShell(AdbShellWrite::RemoveWorkDir { serial }) => shell_remote(
-            serial,
-            &join_quoted(&["rm", "-rf", "/data/local/tmp/flashwright"]),
         ),
         WriteCmd::AdbShell(AdbShellWrite::RunPatchScript { serial }) => shell_remote(
             serial,
@@ -362,7 +370,7 @@ mod golden {
     use crate::cmd::{
         AdbHostRead, AdbHostWrite, AdbShellRead, AdbShellWrite, ByNameRoot, ByteLen, DeviceSerial,
         ExecOutSuRead, FastbootRead, FastbootVar, FastbootWrite, HostRef, ImageRef, PackageName,
-        PropName, PullRemote, ReadCmd, SuRead, SuWrite, WorkFile, WriteCmd,
+        PropName, PullName, PullRemote, ReadCmd, SuRead, SuWrite, WorkFile, WriteCmd,
     };
     use crate::device::{Partition, RebootTarget, Slot};
 
@@ -413,7 +421,7 @@ mod golden {
                 read_argv(&ReadCmd::AdbHost(AdbHostRead::Pull {
                     serial: serial.clone(),
                     remote: PullRemote::Validated(path),
-                    dst_name: "base.apk".into(),
+                    dst_name: PullName::new("base.apk").unwrap(),
                 }))
                 .unwrap(),
             ),
@@ -422,7 +430,7 @@ mod golden {
                 read_argv(&ReadCmd::AdbHost(AdbHostRead::Pull {
                     serial: serial.clone(),
                     remote: PullRemote::Work(WorkFile::Patched),
-                    dst_name: "patched.img".into(),
+                    dst_name: PullName::new("patched.img").unwrap(),
                 }))
                 .unwrap(),
             ),
@@ -599,9 +607,9 @@ mod golden {
             ),
             (
                 "rm",
-                write_argv(&WriteCmd::AdbShell(AdbShellWrite::RemoveWorkDir {
+                cleanup_argv(&CleanupCmd::RemoveWorkDir {
                     serial: serial.clone(),
-                }))
+                })
                 .unwrap(),
             ),
             (

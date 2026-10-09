@@ -4,8 +4,8 @@ fn main() {
         dry_run: true,
         steps: Vec::new(),
         firmware: flashwright_core::wizard::FirmwareClaim::default(),
-        finally_steps: 0,
         after_dry_run: None,
+        images: Vec::new(),
         facts: (),
     };
 }

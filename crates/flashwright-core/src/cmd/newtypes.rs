@@ -4,8 +4,12 @@
 //! Argument newtypes. `TryFrom` rejects; it never rewrites the input.
 
 use std::fmt;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use thiserror::Error;
 
 use crate::device::{Partition, Slot};
@@ -89,12 +93,29 @@ pub struct ImageRef {
     id: u64,
     path: String,
     size_bytes: u64,
+    sha256: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetRef {
     name: String,
     path: String,
+    #[serde(default)]
+    sha256: String,
+}
+
+/// One path segment for an adb pull. The plan stores this name, not a host path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct PullName(String);
+
+/// A host file opened by core: absolute, not a symlink, hashed, and held open.
+pub struct VerifiedHostFile {
+    path: PathBuf,
+    sha256: String,
+    sha1: String,
+    len: u64,
+    file: File,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,7 +250,24 @@ impl ImageRef {
             id,
             path: path.into(),
             size_bytes,
+            sha256: String::new(),
         }
+    }
+
+    /// A host image the plan may name. The file was opened and hashed by core.
+    pub fn for_plan(id: u64, file: &VerifiedHostFile) -> Result<Self, CmdError> {
+        if file.len == 0 {
+            return Err(CmdError::Rejected {
+                field: "image",
+                issue: "rejected",
+            });
+        }
+        Ok(Self {
+            id,
+            path: file.path_string(),
+            size_bytes: file.len,
+            sha256: file.sha256.clone(),
+        })
     }
 
     pub fn id(&self) -> u64 {
@@ -261,18 +299,19 @@ impl<'de> Deserialize<'de> for ImageRef {
             size_bytes: u64,
         }
         let raw = Raw::deserialize(deserializer)?;
-        let meta = std::fs::metadata(&raw.path).map_err(|_| {
+        let verified = VerifiedHostFile::open(&raw.path).map_err(|_| {
             serde::de::Error::custom("image file is missing; the size cannot be verified")
         })?;
-        if !meta.is_file() || meta.len() != raw.size_bytes {
+        if verified.len != raw.size_bytes {
             return Err(serde::de::Error::custom(
                 "image size does not match the file on disk",
             ));
         }
         Ok(Self {
             id: raw.id,
-            path: raw.path,
-            size_bytes: meta.len(),
+            path: verified.path_string(),
+            size_bytes: verified.len,
+            sha256: verified.sha256,
         })
     }
 }
@@ -283,7 +322,23 @@ impl AssetRef {
         Self {
             name: name.into(),
             path: path.into(),
+            sha256: String::new(),
         }
+    }
+
+    /// A host file the plan may push. The file was opened and hashed by core.
+    pub fn for_plan(name: impl Into<String>, file: &VerifiedHostFile) -> Result<Self, CmdError> {
+        if file.len == 0 {
+            return Err(CmdError::Rejected {
+                field: "asset",
+                issue: "rejected",
+            });
+        }
+        Ok(Self {
+            name: name.into(),
+            path: file.path_string(),
+            sha256: file.sha256.clone(),
+        })
     }
 
     pub(crate) fn path(&self) -> &str {
@@ -298,6 +353,134 @@ impl HostRef {
             Self::Asset(asset) => asset.path(),
         }
     }
+}
+
+impl ImageRef {
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+}
+
+impl AssetRef {
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+}
+
+impl PullName {
+    pub fn new(name: impl Into<String>) -> Result<Self, CmdError> {
+        let name = name.into();
+        if !pull_name_ok(&name) {
+            return Err(CmdError::Rejected {
+                field: "pull",
+                issue: "rejected",
+            });
+        }
+        Ok(Self(name))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for PullName {
+    type Error = CmdError;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        Self::new(name)
+    }
+}
+
+impl From<PullName> for String {
+    fn from(name: PullName) -> Self {
+        name.0
+    }
+}
+
+impl VerifiedHostFile {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, CmdError> {
+        let path = path.as_ref();
+        if !host_path_ok(&path.to_string_lossy()) {
+            return Err(CmdError::Rejected {
+                field: "host file",
+                issue: "rejected",
+            });
+        }
+        let meta = std::fs::symlink_metadata(path).map_err(|_| CmdError::Rejected {
+            field: "host file",
+            issue: "rejected",
+        })?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err(CmdError::Rejected {
+                field: "host file",
+                issue: "rejected",
+            });
+        }
+        let mut file = File::open(path).map_err(|_| CmdError::Rejected {
+            field: "host file",
+            issue: "rejected",
+        })?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|_| CmdError::Rejected {
+                field: "host file",
+                issue: "rejected",
+            })?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            sha256: hex_digest(&sha2::Sha256::digest(&bytes)),
+            sha1: hex_digest(&sha1::Sha1::digest(&bytes)),
+            len: meta.len(),
+            file,
+        })
+    }
+
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    pub fn sha1(&self) -> &str {
+        &self.sha1
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn path_string(&self) -> String {
+        self.path.to_string_lossy().into_owned()
+    }
+
+    pub fn file(&self) -> &File {
+        &self.file
+    }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn pull_name_ok(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 || name == "." || name == ".." {
+        return false;
+    }
+    name.chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-')
 }
 
 impl TryFrom<&str> for DeviceSerial {
@@ -447,6 +630,16 @@ fn package_label(label: &str) -> bool {
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
+fn host_path_ok(path: &str) -> bool {
+    if path.is_empty() || path.contains('\0') || path.contains('\n') || path.contains('\r') {
+        return false;
+    }
+    if path.starts_with(r"\\") || path.starts_with("//") {
+        return false;
+    }
+    Path::new(path).is_absolute()
+}
+
 fn code_path_ok(value: &str) -> bool {
     let Some(rest) = value.strip_prefix("/data/app/") else {
         return false;
@@ -518,6 +711,37 @@ mod tests {
                 .unwrap();
         assert!(path.as_str().ends_with("/base.apk"));
         assert!(ValidatedDevicePath::from_code_path("/data/app/foo; reboot").is_err());
+    }
+
+    #[test]
+    fn pull_name_is_one_segment() {
+        assert!(PullName::new("base.apk").is_ok());
+        assert!(PullName::new("patched.img").is_ok());
+        assert!(PullName::new("../x").is_err());
+        assert!(PullName::new("..").is_err());
+        assert!(PullName::new("/tmp/base.apk").is_err());
+        assert!(PullName::new("").is_err());
+    }
+
+    #[test]
+    fn a_verified_host_file_keeps_its_hash() {
+        let dir = std::env::temp_dir().join(format!(
+            "flashwright-host-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stock.img");
+        std::fs::write(&path, b"stock-bytes").unwrap();
+        let file = VerifiedHostFile::open(&path).unwrap();
+        assert_eq!(file.len(), 11);
+        assert_eq!(file.sha256().len(), 64);
+        assert_eq!(file.sha1().len(), 40);
+        assert!(VerifiedHostFile::open("stock.img").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

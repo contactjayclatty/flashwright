@@ -116,18 +116,6 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         *self.active.lock().expect("armed run") = None;
     }
 
-    /// Drop every pending write except the last `keep`, so a cleanup tail can still run.
-    pub(crate) fn keep_last_pending(&self, keep: usize) {
-        let mut guard = self.active.lock().expect("armed run");
-        let Some(active) = guard.as_mut() else {
-            return;
-        };
-        let len = active.pending.len();
-        if len > keep {
-            active.pending.drain(0..len - keep);
-        }
-    }
-
     /// `(installed, digest still matches, adb server is the verified binary)`.
     pub(crate) fn tool_gate(&self) -> (bool, bool, bool) {
         let guard = self.verified.lock().expect("verified tools");
@@ -156,8 +144,14 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
     }
 
     pub async fn run_read(&self, cmd: crate::cmd::ReadCmd) -> Result<RunResult, DeviceError> {
-        let rendered =
+        let mut rendered =
             crate::cmd::read_argv(&cmd).map_err(|err| DeviceError::Message(err.to_string()))?;
+        if let crate::cmd::ReadCmd::AdbHost(crate::cmd::AdbHostRead::Pull { dst_name, .. }) = &cmd {
+            let dest = pull_destination(self.armed_plan_hash(), dst_name.as_str())?;
+            if let Some(last) = rendered.args.last_mut() {
+                *last = dest;
+            }
+        }
         let budget = crate::timeouts::read_budget(&cmd);
         let program = self.program_for(rendered.tool);
         let command = CatalogueCommand::from_rendered(rendered);
@@ -191,6 +185,34 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
             .await;
         drop(locks);
         result
+    }
+
+    /// Remove the fixed work directory. This does not take a write token.
+    ///
+    /// A failed removal is tried once more. The second result is the one returned.
+    pub(crate) async fn run_cleanup(
+        &self,
+        cmd: &crate::cmd::CleanupCmd,
+    ) -> Result<RunResult, DeviceError> {
+        let rendered =
+            crate::cmd::cleanup_argv(cmd).map_err(|err| DeviceError::Message(err.to_string()))?;
+        let budget = crate::timeouts::cleanup_budget();
+        let program = self.program_for(rendered.tool);
+        let command = CatalogueCommand::from_rendered(rendered);
+        let limits = RunLimits::from_budget(&budget);
+        match self.run_tool(program, command.clone(), limits).await {
+            Ok(result) if result.success_exit() => Ok(result),
+            _ => self.run_tool(program, command, limits).await,
+        }
+    }
+
+    fn armed_plan_hash(&self) -> String {
+        self.active
+            .lock()
+            .expect("armed run")
+            .as_ref()
+            .map(|run| run.plan_hash.clone())
+            .unwrap_or_else(|| "unplanned".to_string())
     }
 
     fn reverify_before_write(
@@ -903,6 +925,25 @@ fn deadline_outcome(mode: Option<Mode>, target: WaitTarget) -> WaitOutcome {
             _ => WaitOutcome::WrongMode { actual },
         },
     }
+}
+
+fn pull_destination(plan_hash: String, name: &str) -> Result<String, DeviceError> {
+    let segment = if plan_segment(&plan_hash) {
+        plan_hash
+    } else {
+        "unplanned".to_string()
+    };
+    let dir = std::env::temp_dir().join("flashwright-plan").join(segment);
+    std::fs::create_dir_all(&dir).map_err(|err| DeviceError::Message(err.to_string()))?;
+    Ok(dir.join(name).to_string_lossy().into_owned())
+}
+
+fn plan_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 80
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
 }
 
 fn command_failed(command: &str, result: &RunResult) -> DeviceError {

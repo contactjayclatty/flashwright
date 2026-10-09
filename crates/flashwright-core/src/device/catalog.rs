@@ -3,7 +3,7 @@
 
 use serde::Deserialize;
 
-use crate::device::DeviceError;
+use crate::device::{DeviceError, Partition};
 
 const ALIASES: &str = include_str!("../../../../data/device_aliases.toml");
 const DEVICES: &str = include_str!("../../../../data/devices.toml");
@@ -57,6 +57,9 @@ pub struct DeviceRow {
     pub codename: String,
     pub model: Option<String>,
     pub has_init_boot: bool,
+    pub patch_partition: Partition,
+    /// Gate id from the device catalogue. Present when a boot-image mismatch is that phone's rule.
+    pub boot_gate: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -72,21 +75,40 @@ impl DeviceTable {
     pub fn from_toml(text: &str) -> Result<Self, DeviceError> {
         let file: DeviceFile =
             toml::from_str(text).map_err(|err| DeviceError::Catalogue(err.to_string()))?;
-        Ok(Self {
-            rows: file
-                .device
-                .into_iter()
-                .map(|row| DeviceRow {
-                    codename: row.codename,
+        let rows = file
+            .device
+            .into_iter()
+            .map(|row| {
+                let patch_partition = parse_patch_partition(&row.patch_partition)?;
+                Ok(DeviceRow {
+                    codename: row.codename.to_ascii_lowercase(),
                     model: row.model,
                     has_init_boot: row.has_init_boot,
+                    patch_partition,
+                    boot_gate: row.boot_gate,
                 })
-                .collect(),
-        })
+            })
+            .collect::<Result<Vec<_>, DeviceError>>()?;
+        Ok(Self { rows })
     }
 
     pub fn get(&self, codename: &str) -> Option<&DeviceRow> {
-        self.rows.iter().find(|row| row.codename == codename)
+        let folded = codename.to_ascii_lowercase();
+        self.rows.iter().find(|row| row.codename == folded)
+    }
+
+    pub fn rows(&self) -> &[DeviceRow] {
+        &self.rows
+    }
+}
+
+fn parse_patch_partition(name: &str) -> Result<Partition, DeviceError> {
+    match name {
+        "boot" => Ok(Partition::Boot),
+        "init_boot" => Ok(Partition::InitBoot),
+        other => Err(DeviceError::Catalogue(format!(
+            "unknown patch partition {other}"
+        ))),
     }
 }
 
@@ -158,6 +180,9 @@ struct DeviceRowFile {
     #[serde(default)]
     model: Option<String>,
     has_init_boot: bool,
+    patch_partition: String,
+    #[serde(default)]
+    boot_gate: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

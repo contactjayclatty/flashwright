@@ -71,6 +71,16 @@ Android, Google, and Pixel are trademarks of Google LLC. Magisk is a project by 
 
 Platform-tools are located and version-checked before a scan. Writes stay off until an allow-list entry has per-file hashes and has been device-tested. A confirmed plan is single-use: Flashwright re-checks the phone and the input files, then discards the plan if either has changed.
 
+## Features
+
+- **Patch on your phone.** The Magisk app you already installed patches init_boot. You confirm "Patch on your phone?" before anything is copied to the phone.
+- **PC check.** Flashwright reads the patched init_boot and checks that Magisk's init and the stock SHA-1 are present.
+- **Pixel 9 Pro XL.** That phone (komodo) patches init_boot.
+
+## Status
+
+The patch step is exercised with sample command output. It does not talk to a phone. A hidden or renamed Magisk app stops the plan before any file is copied. The LU0 / FIPS region is refused.
+
 ## The wizard
 
 <table>

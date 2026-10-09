@@ -28,7 +28,7 @@ pub use model::{
     WizardPlan,
 };
 pub use session::{
-    plan_code, plan_hash, with_platform_tools, Clock, FirmwareClaim, FixedClock, Phase,
+    plan_code, plan_hash, with_platform_tools, Clock, FirmwareClaim, FixedClock, ImageSeal, Phase,
     PlanPreview, PlanRequest, PlanStep, PlanStepView, RunReport, SystemClock, WizardSession,
 };
 pub use steps::{GateView, Route, Step, StepClass, Tool, SCHEMA};

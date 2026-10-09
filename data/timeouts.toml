@@ -62,3 +62,9 @@ watchdog_s = 60
 base_s = 300
 min_s = 300
 watchdog_s = 120
+
+[mkdir]
+timeout_s = 15
+
+[cleanup]
+timeout_s = 30

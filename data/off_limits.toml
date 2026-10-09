@@ -3,7 +3,9 @@
 # product does not run: wiping data, turning verification off, erasing a
 # partition, or starting a host shell.
 
-regions = ["lu0", "fips"]
+# Exact labels for the patch-plan region check (gate G24). Path segments still
+# feed gate G25. The combined labels are whole strings, not substrings.
+regions = ["lu0", "fips", "lu0 / fips", "lu0/fips"]
 
 argv = ["--disable-verity", "--disable-verification", "-w", "--wipe", "erase"]
 
