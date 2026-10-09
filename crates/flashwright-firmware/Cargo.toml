@@ -1,0 +1,37 @@
+[package]
+name = "flashwright-firmware"
+description = "Open a factory or full OTA package and extract init_boot or boot. No device writes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+payload_dumper = { version = "=0.8.4", default-features = false, features = ["local_zip"] }
+prost = "0.14"
+tokio.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+toml.workspace = true
+sha2.workspace = true
+sha1.workspace = true
+zip.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
+[build-dependencies]
+prost-build = "0.14"
+protoc-bin-vendored = "3"
+
+[dev-dependencies]
+tokio.workspace = true

@@ -14,10 +14,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-use crate::cmd::{ReadCmd, WriteCmd};
-use crate::device::PlatformToolsTransport;
+use crate::cmd::{DeviceSerial, ReadCmd, WriteCmd};
+use crate::device::{PlatformToolsTransport, Slot};
 use crate::parse::{self, Verdict};
 use crate::proc::CommandRunner;
+use crate::safety::{self, BackupState, FactoryInitBoot, InitBootRecord, SafetyFacts};
 use crate::token::mint_confirmed;
 use crate::CoreError;
 
@@ -121,6 +122,8 @@ pub struct WizardSession<R: CommandRunner> {
     held: Option<HeldPlan>,
     consumed: BTreeSet<String>,
     transport: PlatformToolsTransport<R>,
+    safety: Option<SafetyFacts>,
+    backup: Option<BackupState>,
 }
 
 impl<R: CommandRunner> WizardSession<R> {
@@ -135,6 +138,44 @@ impl<R: CommandRunner> WizardSession<R> {
             held: None,
             consumed: BTreeSet::new(),
             transport,
+            safety: None,
+            backup: None,
+        }
+    }
+
+    /// Facts the safety gates read. Image writes without facts are refused.
+    pub fn set_safety(&mut self, facts: SafetyFacts) {
+        self.safety = Some(facts);
+    }
+
+    /// Read stock init_boot, store its SHA-256, and compare it with the factory image.
+    ///
+    /// A mismatch is kept as a block. A later dry run or confirm refuses the plan.
+    pub async fn backup_stock_init_boot(
+        &mut self,
+        serial: &DeviceSerial,
+        slot: Slot,
+        expected_codename: &str,
+        factory: &dyn FactoryInitBoot,
+    ) -> Result<InitBootRecord, CoreError> {
+        match safety::pull_stock_init_boot(
+            &self.transport,
+            serial,
+            slot,
+            expected_codename,
+            factory,
+        )
+        .await
+        {
+            Ok(record) => {
+                self.backup = Some(BackupState::Verified(record.clone()));
+                Ok(record)
+            }
+            Err(block) => {
+                let reason = block.reason.clone();
+                self.backup = Some(BackupState::Blocked(block));
+                Err(rejected(reason))
+            }
         }
     }
 
@@ -179,18 +220,14 @@ impl<R: CommandRunner> WizardSession<R> {
         Ok(preview)
     }
 
-    /// Same expiry and step checks as confirm. Mints no token and leaves the plan.
+    /// Evaluate every safety gate. Mints no token, spawns nothing, and leaves the plan.
+    ///
+    /// A passing plan prints `WOULD RUN` for each write. A failing gate prints
+    /// `WOULD BLOCK` and the reason, and no write line.
     pub fn dry_run(&self, plan_hash_value: &str) -> Result<Vec<String>, CoreError> {
         let held = self.ready(plan_hash_value)?;
-        let mut lines = Vec::new();
-        for step in &held.steps {
-            if let PlanStep::Write(cmd) = step {
-                let rendered =
-                    crate::cmd::write_argv(cmd).map_err(|err| rejected(err.to_string()))?;
-                lines.push(format!("WOULD RUN: {}", rendered.args.join(" ")));
-            }
-        }
-        Ok(lines)
+        let decisions = safety::evaluate(&held.steps, self.safety.as_ref(), self.backup.as_ref());
+        Ok(safety::dry_run_lines(&held.steps, &decisions))
     }
 
     /// Run the reviewed plan once. The token never leaves this function.
@@ -198,9 +235,22 @@ impl<R: CommandRunner> WizardSession<R> {
     /// A plan built with `dry_run` is refused here, so this path mints a token
     /// only for a plan that was not a dry run.
     pub async fn confirm_and_run(&mut self, plan_hash_value: &str) -> Result<RunReport, CoreError> {
-        let dry_run = self.ready(plan_hash_value)?.dry_run;
+        let (dry_run, steps) = {
+            let held = self.ready(plan_hash_value)?;
+            (held.dry_run, held.steps.clone())
+        };
         if dry_run {
             return Err(CoreError::DryRunPlan);
+        }
+        let decisions = safety::evaluate(&steps, self.safety.as_ref(), self.backup.as_ref());
+        if decisions.iter().any(|gate| gate.blocked) {
+            let reason = decisions
+                .iter()
+                .filter(|gate| gate.blocked)
+                .map(|gate| format!("{} {}", gate.id, gate.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(rejected(format!("Blocked: {reason}")));
         }
         let held = self.held.take().expect("review plan");
         // Mark the plan used before step 1. A second call returns AlreadyUsed.
@@ -228,6 +278,18 @@ impl<R: CommandRunner> WizardSession<R> {
                     lines.push(result.stdout_text());
                 }
                 PlanStep::Write(cmd) => {
+                    let decisions =
+                        safety::evaluate_step(step, self.safety.as_ref(), self.backup.as_ref());
+                    if decisions.iter().any(|gate| gate.blocked) {
+                        self.phase = Phase::Recovery;
+                        let reason = decisions
+                            .iter()
+                            .filter(|gate| gate.blocked)
+                            .map(|gate| format!("{} {}", gate.id, gate.reason))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        return Err(rejected(format!("Blocked: {reason}")));
+                    }
                     let result = self.transport.run_write(&token, cmd.clone()).await;
                     match result {
                         Ok(result) if write_ok(cmd, &result) => {
@@ -380,8 +442,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::cmd::{AdbHostWrite, DeviceSerial, RebootMode};
-    use crate::device::TransportConfig;
+    use crate::cmd::{AdbHostWrite, DeviceSerial, FastbootWrite, ImageRef, RebootMode};
+    use crate::device::{Partition, Slot, TransportConfig};
     use crate::proc::{ScriptedResponse, ScriptedRunner};
     use crate::token::open_run_count;
 
@@ -485,6 +547,84 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("expired"));
+        assert_eq!(session.phase(), Phase::Review);
+    }
+
+    fn komodo_serial() -> DeviceSerial {
+        DeviceSerial::try_from("synth-komodo-1").unwrap()
+    }
+
+    fn flash_draft(expires: i64) -> PlanDraft {
+        PlanDraft {
+            serial: "synth-komodo-1".into(),
+            dry_run: false,
+            expires_unix_ms: expires,
+            steps: vec![PlanStep::Write(WriteCmd::Fastboot(FastbootWrite::Flash {
+                serial: komodo_serial(),
+                slot: Slot::B,
+                partition: Partition::InitBoot,
+                image: ImageRef::new(1, "/var/flashwright/init_boot.img", 4096),
+            }))],
+        }
+    }
+
+    #[tokio::test]
+    async fn a_blocked_flash_dry_run_mints_nothing_and_writes_nothing() {
+        let _gate = gate().await;
+        let runner = Arc::new(ScriptedRunner::new());
+        let mut session = session(Arc::clone(&runner), 1_000);
+        let preview = session.build_plan(flash_draft(5_000)).unwrap();
+        let before = open_run_count();
+        let lines = session.dry_run(&preview.plan_hash).unwrap();
+        assert!(lines.iter().any(|line| line.starts_with("WOULD BLOCK:")));
+        assert!(lines.iter().all(|line| !line.starts_with("WOULD RUN")));
+        assert!(runner.calls().is_empty());
+        assert_eq!(open_run_count(), before);
+        let err = session
+            .confirm_and_run(&preview.plan_hash)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Blocked:"));
+        assert_eq!(session.phase(), Phase::Review);
+        assert!(runner.calls().is_empty());
+        assert_eq!(open_run_count(), before);
+    }
+
+    #[tokio::test]
+    async fn verified_init_boot_lets_the_dry_run_pass() {
+        let _gate = gate().await;
+        let stock = b"synthetic-komodo-init-boot".to_vec();
+        let runner = Arc::new(ScriptedRunner::new());
+        let seen = stock.clone();
+        let name = if cfg!(windows) { "adb.exe" } else { "adb" };
+        runner.on_fn(
+            name,
+            &["-s", "synth-komodo-1", "exec-out"],
+            move |_call, _hit| ScriptedResponse::ok(seen.clone()),
+        );
+        let mut session = session(Arc::clone(&runner), 1_000);
+        session.set_safety(crate::safety::SafetyFacts::komodo_ready());
+        let factory = crate::safety::BytesInitBoot {
+            codename: "komodo".into(),
+            bytes: stock.clone(),
+        };
+        let record = session
+            .backup_stock_init_boot(&komodo_serial(), crate::device::Slot::A, "komodo", &factory)
+            .await
+            .unwrap();
+        assert_eq!(record.sha256.len(), 64);
+        assert_eq!(runner.calls().len(), 2);
+        let preview = session.build_plan(flash_draft(5_000)).unwrap();
+        let before = open_run_count();
+        let calls = runner.calls().len();
+        let lines = session.dry_run(&preview.plan_hash).unwrap();
+        assert!(
+            lines.iter().all(|line| line.starts_with("WOULD RUN:")),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains("flash init_boot"));
+        assert_eq!(runner.calls().len(), calls);
+        assert_eq!(open_run_count(), before);
         assert_eq!(session.phase(), Phase::Review);
     }
 }

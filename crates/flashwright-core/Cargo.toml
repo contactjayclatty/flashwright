@@ -18,6 +18,7 @@ mock = []
 [dependencies]
 flashwright-plan = { path = "../flashwright-plan" }
 flashwright-tools = { path = "../flashwright-tools" }
+flashwright-firmware = { path = "../flashwright-firmware" }
 flashwright-winusb = { path = "../flashwright-winusb" }
 tokio.workspace = true
 thiserror.workspace = true

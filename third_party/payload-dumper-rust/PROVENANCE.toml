@@ -1,0 +1,12 @@
+# Comparison copy of payload-dumper-rust's vendored proto, plus its licence.
+# Flashwright compiles the AOSP proto, not this file.
+# The upstream repository has a LICENSE and no NOTICE file.
+
+repo = "https://github.com/rhythmcache/payload-dumper-rust"
+commit = "ac244d82b54fdd76adf9bf0afcd6edc97f277f7e"
+crate = "payload_dumper"
+version = "0.8.4"
+license = "Apache-2.0"
+notice = "none"
+proto = "proto/update_metadata.proto"
+accepted_delta = "InstallOperation.Type adds ZSTD = 14"
