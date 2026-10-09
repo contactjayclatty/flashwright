@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ack-gate"
+description = "Enables the ack_gate command without any pre-configured scope."
+commands.allow = ["ack_gate"]
+
+[[permission]]
+identifier = "deny-ack-gate"
+description = "Denies the ack_gate command without any pre-configured scope."
+commands.deny = ["ack_gate"]

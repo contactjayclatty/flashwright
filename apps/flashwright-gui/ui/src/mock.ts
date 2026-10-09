@@ -1,6 +1,7 @@
 import type {
   DeviceInfo,
   EngineApi,
+  FirmwareRef,
   GateView,
   JobView,
   Notice,
@@ -42,7 +43,7 @@ function passGates(): GateView[] {
     gate("G07", "block", "pass", "No downgrade", "The package is newer than the phone."),
     gate("G08", "block", "pass", "Patch level", "The image patch level matches the package."),
     gate("G09", "block", "pass", "Patched image", "The patched image matches the stock image that was prepared."),
-    gate("G10", "block", "pass", "Root tool", "The on-device root tool is new enough."),
+    gate("G10", "block", "pass", "Magisk app", "The Magisk app is new enough."),
     gate("G11", "block", "pass", "Battery", "Battery is 82%."),
     gate("G12", "block", "pass", "Disk space", "The working disk has enough free space."),
     gate("G13", "block", "pass", "Phone space", "The phone has enough free space."),
@@ -126,6 +127,7 @@ export class MockEngine implements EngineApi {
   private actionChosen = false;
   private route: Route = "ota";
   private preferDryRun = true;
+  private planKind = "update_keep_root";
   private firmwareName = "";
   private firmwareOk = false;
   private notice: Notice | null = null;
@@ -212,7 +214,7 @@ export class MockEngine implements EngineApi {
         both_slots_enabled: false,
         both_slots_reason:
           "Writing both slots removes your fallback and is risky with anti-rollback. Coming later in Expert mode.",
-        root_tool_label: "On-device root tool",
+        root_tool_label: "Magisk app",
         root_tool_version: selected?.root_present ? `stable ${selected.root_tool_version}` : "—",
         backup_folder: "%LOCALAPPDATA%\\Flashwright\\backups",
       },
@@ -245,6 +247,66 @@ export class MockEngine implements EngineApi {
 
   async scan(): Promise<Snapshot> {
     this.notice = null;
+    return this.snapshot();
+  }
+
+  async subscribe(): Promise<void> {
+    await this.snapshot();
+  }
+
+  async toolsStatus(): Promise<Snapshot> {
+    return this.snapshot();
+  }
+
+  async toolsPickFolder(): Promise<Snapshot> {
+    return this.snapshot();
+  }
+
+  async toolsImportZip(): Promise<Snapshot> {
+    return this.snapshot();
+  }
+
+  async pickFirmware(): Promise<FirmwareRef> {
+    return { id: "fw-harbor", display_name: FIXTURE_OTA_NAME, size: 34 * 1024 * 1024 };
+  }
+
+  async preparePatch(firmwareId: string): Promise<Snapshot> {
+    if (!this.firmwareOk || firmwareId !== "fw-harbor") {
+      this.notice = { level: "block", message: "Check a package before preparing a patch.", gates: [] };
+      return this.snapshot();
+    }
+    this.phase = "review";
+    this.planKind = "prepare_patch";
+    this.preferDryRun = false;
+    this.notice = null;
+    return this.snapshot();
+  }
+
+  async ackGate(planHash: string, gateId: string): Promise<Snapshot> {
+    const plan = this.plan();
+    if (!plan || plan.plan_hash !== planHash) {
+      throw new Error("That plan code was not issued by Flashwright.");
+    }
+    const row = plan.gates.find((item) => item.id === gateId);
+    if (!row) {
+      throw new Error("That check is not on this plan.");
+    }
+    return this.snapshot();
+  }
+
+  async backupsList(): Promise<Snapshot> {
+    return this.snapshot();
+  }
+
+  async restorePlan(setId: string, item: string): Promise<Snapshot> {
+    if (setId !== "4f2a9c01-0000-7000-8000-000000000001" || item.length === 0) {
+      throw new Error("That backup is not available.");
+    }
+    this.notice = {
+      level: "info",
+      message: "Restore still needs its own review and confirm.",
+      gates: [],
+    };
     return this.snapshot();
   }
 
@@ -359,6 +421,7 @@ export class MockEngine implements EngineApi {
       return this.snapshot();
     }
     this.phase = "review";
+    this.planKind = "update_keep_root";
     this.job = idleJob();
     this.notice = null;
     return this.snapshot();
@@ -404,11 +467,11 @@ export class MockEngine implements EngineApi {
         {
           ts: "13:41:02",
           level: "ok",
-          text: "Updated to HQ1A.MOCK.002. Root is working (root tool 30.7).",
+          text: "Updated to HQ1A.MOCK.002. Root is working (Magisk app 30.7).",
         },
       ],
       result_title: "Updated to HQ1A.MOCK.002",
-      result_body: "Root is working (root tool 30.7).",
+      result_body: "Root is working (Magisk app 30.7).",
       recovery: [],
       cancel_mode: "immediate",
     };
@@ -428,6 +491,17 @@ export class MockEngine implements EngineApi {
     this.notice = known
       ? { level: "info", message: "That page is allow-listed. Flashwright opens it in your browser.", gates: [] }
       : { level: "block", message: "That link is not on the allow list.", gates: [] };
+    return this.snapshot();
+  }
+
+  async cancel(): Promise<Snapshot> {
+    this.job = {
+      ...this.job,
+      state: "cancelled",
+      status_line: "Stopped after this step.",
+      result_title: "Stopped",
+      result_body: "Stopped after this step.",
+    };
     return this.snapshot();
   }
 
@@ -459,6 +533,8 @@ export class MockEngine implements EngineApi {
       gates: passGates(),
       steps: otaSteps(this.firmwareName || FIXTURE_OTA_NAME),
       prefer_dry_run: this.preferDryRun,
+      kind: this.planKind,
+      dry_run: false,
     };
   }
 

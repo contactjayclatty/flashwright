@@ -26,6 +26,49 @@ pub struct Rendered {
     pub args: Vec<String>,
 }
 
+/// A rendered catalogue command. Fields are private so callers cannot swap in
+/// an arbitrary argument vector.
+#[derive(Clone, Debug)]
+pub struct CatalogueCommand {
+    #[allow(dead_code)]
+    tool: Tool,
+    args: Vec<String>,
+    group: crate::proc::ProcessGroup,
+}
+
+impl CatalogueCommand {
+    pub(crate) fn from_rendered(rendered: Rendered) -> Self {
+        Self {
+            tool: rendered.tool,
+            args: rendered.args,
+            group: crate::proc::ProcessGroup::TiedToParent,
+        }
+    }
+
+    /// Unix runner tests build a measured adb and pass a short argument list.
+    #[cfg(all(test, unix))]
+    pub(crate) fn for_test(tool: Tool, args: Vec<String>) -> Self {
+        Self {
+            tool,
+            args,
+            group: crate::proc::ProcessGroup::TiedToParent,
+        }
+    }
+
+    pub(crate) fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    pub(crate) fn group(&self) -> crate::proc::ProcessGroup {
+        self.group
+    }
+
+    pub(crate) fn detached(mut self) -> Self {
+        self.group = crate::proc::ProcessGroup::Detached;
+        self
+    }
+}
+
 pub fn sh_quote(token: &str) -> String {
     let mut out = String::from("'");
     for ch in token.chars() {
@@ -42,6 +85,8 @@ pub fn sh_quote(token: &str) -> String {
 pub fn read_argv(cmd: &ReadCmd) -> Result<Rendered, CmdError> {
     let args = match cmd {
         ReadCmd::AdbHost(AdbHostRead::Version) => vec!["version".into()],
+        ReadCmd::AdbHost(AdbHostRead::KillServer) => vec!["kill-server".into()],
+        ReadCmd::AdbHost(AdbHostRead::StartServer) => vec!["start-server".into()],
         ReadCmd::AdbHost(AdbHostRead::Devices) | ReadCmd::Fastboot(FastbootRead::Devices) => {
             vec!["devices".into(), "-l".into()]
         }
@@ -72,6 +117,7 @@ pub fn read_argv(cmd: &ReadCmd) -> Result<Rendered, CmdError> {
             args.push(su_multi(&["cat", &path]));
             args
         }
+        ReadCmd::Fastboot(FastbootRead::Version) => vec!["--version".into()],
         ReadCmd::Fastboot(FastbootRead::GetvarAll { serial }) => {
             serial_args(serial, &["getvar", "all"])
         }

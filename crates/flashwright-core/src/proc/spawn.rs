@@ -47,19 +47,21 @@ pub(crate) fn clear_spawn_log() {
 #[cfg(test)]
 static SPAWN_LOG: std::sync::Mutex<Vec<(String, Vec<String>)>> = std::sync::Mutex::new(Vec::new());
 
-/// When set, Linux tests spawn `strace` in front of the real program.
+/// When set on this thread, Linux tests spawn `strace` in front of the real program.
 #[cfg(all(test, unix))]
 pub(crate) fn set_exec_trace(path: Option<std::path::PathBuf>) {
-    *EXEC_TRACE.lock().expect("exec trace") = path;
+    EXEC_TRACE.with(|slot| *slot.borrow_mut() = path);
 }
 
 #[cfg(all(test, unix))]
 pub(crate) fn exec_trace() -> Option<std::path::PathBuf> {
-    EXEC_TRACE.lock().expect("exec trace").clone()
+    EXEC_TRACE.with(|slot| slot.borrow().clone())
 }
 
 #[cfg(all(test, unix))]
-static EXEC_TRACE: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+thread_local! {
+    static EXEC_TRACE: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+}
 
 pub(crate) fn command_for(exe: &VerifiedExe) -> tokio::process::Command {
     debug_assert!(exe.path().is_absolute());

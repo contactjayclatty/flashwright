@@ -17,6 +17,8 @@ const TABLE: &str = include_str!("../../../data/timeouts.toml");
 pub struct StepBudget {
     pub timeout: Duration,
     pub watchdog: Option<Duration>,
+    /// Quiet window after a sideload percent line. Other steps leave this empty.
+    pub finalising: Option<Duration>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +86,7 @@ pub fn read_budget(cmd: &ReadCmd) -> StepBudget {
     StepBudget {
         timeout: Duration::from_secs(seconds),
         watchdog: None,
+        finalising: None,
     }
 }
 
@@ -162,17 +165,24 @@ pub fn write_budget(
             return Ok(StepBudget {
                 timeout: Duration::from_secs(file.mkdir.timeout_s),
                 watchdog: None,
+                finalising: None,
             });
         }
         WriteCmd::AdbShell(_) | WriteCmd::Su(_) => {
             (fixed(&file.patch_script), file.patch_script.watchdog_s)
         }
     };
-    let _ = file.sideload.finalising_s;
+    let finalising = match cmd {
+        WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Sideload { .. }) => {
+            Some(Duration::from_secs(file.sideload.finalising_s))
+        }
+        _ => None,
+    };
     let scaled = scale_seconds(timeout_s, scale);
     Ok(StepBudget {
         timeout: Duration::from_secs(scaled),
         watchdog: Some(Duration::from_secs(watchdog_s)),
+        finalising,
     })
 }
 
@@ -186,6 +196,7 @@ pub fn cleanup_budget() -> StepBudget {
     StepBudget {
         timeout: Duration::from_secs(file.cleanup.timeout_s),
         watchdog: None,
+        finalising: None,
     }
 }
 
@@ -193,6 +204,7 @@ pub fn mkdir_budget() -> StepBudget {
     StepBudget {
         timeout: Duration::from_secs(load().mkdir.timeout_s),
         watchdog: None,
+        finalising: None,
     }
 }
 
@@ -202,6 +214,7 @@ pub fn pull_budget(size_bytes: u64, multiplier: f64) -> Result<StepBudget, Timeo
     Ok(StepBudget {
         timeout: Duration::from_secs(scale_seconds(sized(row, size_bytes), scale)),
         watchdog: Some(Duration::from_secs(row.watchdog_s)),
+        finalising: None,
     })
 }
 
@@ -339,6 +352,19 @@ mod tests {
         assert!(images > packed);
         assert_eq!(update_size_bytes(&path, packed), images);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sideload_keeps_a_finalising_window() {
+        let mib = 1024u64 * 1024;
+        let cmd = WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Sideload {
+            serial: crate::cmd::DeviceSerial::try_from("pixel1").unwrap(),
+            package: crate::cmd::ImageRef::new(0, "/var/flashwright/ota.zip", (5 * 1024 * mib) / 2),
+        });
+        let budget = write_budget(&cmd, (5 * 1024 * mib) / 2, 1.0).unwrap();
+        assert_eq!(budget.timeout, Duration::from_secs(2180));
+        assert_eq!(budget.watchdog, Some(Duration::from_secs(300)));
+        assert_eq!(budget.finalising, Some(Duration::from_secs(900)));
     }
 
     #[test]

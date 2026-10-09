@@ -4,12 +4,18 @@
 //! In-memory adb/fastboot stand-in. It checks the same path rules as the
 //! real runner and records every invocation.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::cmd::CatalogueCommand;
+use crate::exe::VerifiedExe;
 use crate::proc::lines::{push_capped, tail_of, LineAssembler};
-use crate::proc::{file_name_lower, CommandRunner, Invocation, ProcError, RunResult, StdStream};
+use crate::proc::{
+    file_name_lower, validate_program, CommandRunner, ProcError, RecordedCall, RunLimits,
+    RunResult, StdStream,
+};
 
 /// Canned output for one matching invocation.
 #[derive(Clone, Debug)]
@@ -57,6 +63,11 @@ impl ScriptedResponse {
         self
     }
 
+    pub fn with_stderr(mut self, stderr: impl Into<Vec<u8>>) -> Self {
+        self.stderr = stderr.into();
+        self
+    }
+
     pub fn hang() -> Self {
         Self {
             exit_code: -1,
@@ -74,7 +85,7 @@ impl ScriptedResponse {
     }
 }
 
-type Responder = Box<dyn Fn(&Invocation, usize) -> ScriptedResponse + Send>;
+type Responder = Box<dyn Fn(&RecordedCall, usize) -> ScriptedResponse + Send>;
 
 enum RouteBody {
     Fixed(ScriptedResponse),
@@ -90,7 +101,7 @@ struct Route {
 
 struct Inner {
     routes: Vec<Route>,
-    calls: Vec<Invocation>,
+    calls: Vec<RecordedCall>,
 }
 
 /// Records calls and returns scripted output. Safe to share across tasks.
@@ -118,7 +129,7 @@ impl ScriptedRunner {
 
     pub fn on_fn<F>(&self, exe: &str, args_prefix: &[&str], respond: F)
     where
-        F: Fn(&Invocation, usize) -> ScriptedResponse + Send + 'static,
+        F: Fn(&RecordedCall, usize) -> ScriptedResponse + Send + 'static,
     {
         self.push_route(exe, args_prefix, RouteBody::Dynamic(Box::new(respond)));
     }
@@ -133,7 +144,7 @@ impl ScriptedRunner {
         });
     }
 
-    pub fn calls(&self) -> Vec<Invocation> {
+    pub fn calls(&self) -> Vec<RecordedCall> {
         self.inner
             .lock()
             .expect("scripted runner lock")
@@ -162,42 +173,71 @@ impl Default for ScriptedRunner {
 }
 
 impl CommandRunner for ScriptedRunner {
-    async fn run(&self, invocation: Invocation) -> Result<RunResult, ProcError> {
-        invocation.validate()?;
+    async fn run(
+        &self,
+        exe: &VerifiedExe,
+        command: &CatalogueCommand,
+        limits: RunLimits,
+    ) -> Result<RunResult, ProcError> {
+        validate_program(exe.path())?;
+        if exe.trust() == crate::exe::Trust::Scripted && !is_platform_name(exe.path()) {
+            return Err(ProcError::Unverified {
+                detail: "only a resolved adb or fastboot may run".into(),
+            });
+        }
         self.note_flight();
-        let result = self.dispatch(invocation).await;
+        let result = self.dispatch(exe, command, limits).await;
         self.end_flight();
         result
     }
 }
 
+fn is_platform_name(path: &Path) -> bool {
+    matches!(
+        file_name_lower(path).as_str(),
+        "adb" | "adb.exe" | "fastboot" | "fastboot.exe"
+    )
+}
+
 impl ScriptedRunner {
-    async fn dispatch(&self, invocation: Invocation) -> Result<RunResult, ProcError> {
+    async fn dispatch(
+        &self,
+        exe: &VerifiedExe,
+        command: &CatalogueCommand,
+        limits: RunLimits,
+    ) -> Result<RunResult, ProcError> {
+        let recorded = RecordedCall {
+            program: exe.path().to_path_buf(),
+            args: command.args().to_vec(),
+            timeout: limits.timeout,
+            watchdog: limits.watchdog,
+            finalising: limits.finalising,
+        };
         let response = {
             let mut inner = self.inner.lock().expect("scripted runner lock");
-            let exe = file_name_lower(&invocation.program);
-            let index = best_route(&inner.routes, &exe, &invocation.args).ok_or_else(|| {
+            let name = file_name_lower(exe.path());
+            let index = best_route(&inner.routes, &name, command.args()).ok_or_else(|| {
                 ProcError::NoScript {
-                    program: invocation.program.display().to_string(),
-                    args: invocation.args.clone(),
+                    program: exe.path().display().to_string(),
+                    args: command.args().to_vec(),
                 }
             })?;
-            inner.calls.push(invocation.clone());
+            inner.calls.push(recorded.clone());
             let route = &mut inner.routes[index];
             let hit = route.hits;
             route.hits += 1;
             match &route.body {
                 RouteBody::Fixed(response) => response.clone(),
-                RouteBody::Dynamic(function) => function(&invocation, hit),
+                RouteBody::Dynamic(function) => function(&recorded, hit),
             }
         };
 
         let started = std::time::Instant::now();
         if response.hang {
-            return hang(&invocation, started).await;
+            return hang(limits, started).await;
         }
-        if response.delay >= invocation.timeout && !invocation.timeout.is_zero() {
-            tokio::time::sleep(invocation.timeout).await;
+        if response.delay >= limits.timeout && !limits.timeout.is_zero() {
+            tokio::time::sleep(limits.timeout).await;
             return Ok(finish(
                 None,
                 Vec::new(),
@@ -242,13 +282,8 @@ fn best_route(routes: &[Route], exe: &str, args: &[String]) -> Option<usize> {
     best.map(|(index, _)| index)
 }
 
-async fn hang(
-    invocation: &Invocation,
-    started: std::time::Instant,
-) -> Result<RunResult, ProcError> {
-    let watchdog = invocation
-        .watchdog
-        .filter(|wait| *wait < invocation.timeout);
+async fn hang(limits: RunLimits, started: std::time::Instant) -> Result<RunResult, ProcError> {
+    let watchdog = limits.watchdog.filter(|wait| *wait < limits.timeout);
     if let Some(wait) = watchdog {
         tokio::time::sleep(wait).await;
         return Ok(finish(
@@ -262,7 +297,7 @@ async fn hang(
             true,
         ));
     }
-    tokio::time::sleep(invocation.timeout).await;
+    tokio::time::sleep(limits.timeout).await;
     Ok(finish(
         None,
         Vec::new(),

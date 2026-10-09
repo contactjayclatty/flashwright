@@ -29,6 +29,31 @@ jobs:
       - name: Static checks
         run: cargo run -p xtask -- check
 
+  window:
+    name: window shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy
+      - name: Install WebKit headers
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Clippy the window
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: cargo clippy -p flashwright-gui --features gui -- -D warnings
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/flashwright-gui/ui/package-lock.json
+      - uses: browser-actions/setup-chrome@v1
+      - name: Window keyboard checks
+        working-directory: apps/flashwright-gui/ui
+        run: npm ci && npm test
+
   fuzz:
     name: fuzz
     runs-on: ubuntu-latest
@@ -54,6 +79,6 @@ jobs:
           if [ "$FUZZ_EVENT" = "schedule" ]; then
             LIMIT=300
           fi
-          cargo +nightly fuzz run inspect -- -max_total_time="$LIMIT" -rss_limit_mb=512
           cargo +nightly fuzz run header -- -max_total_time="$LIMIT" -rss_limit_mb=512
+          cargo +nightly fuzz run ramdisk -- -max_total_time="$LIMIT" -rss_limit_mb=512
           cargo +nightly fuzz run cpio -- -max_total_time="$LIMIT" -rss_limit_mb=512

@@ -20,7 +20,6 @@ mod transport;
 mod types;
 
 pub use crate::token::WriteToken;
-pub use argv::{contains_slot_all, flash_args, set_active_args, update_args};
 pub use catalog::{AliasTable, DeviceRow, DeviceTable, KnownBadMagisk, MinBootloaderTable};
 pub use derive::{
     init_boot_from_ls, init_boot_from_size, interpret_su, lock_from_adb, lock_from_fastboot,

@@ -132,6 +132,7 @@ pub fn plan_app_patch(request: &AppPatchRequest<'_>) -> Result<AppPatchPlan, Mag
             dry_run: false,
             steps,
             firmware: FirmwareClaim::default(),
+            after_dry_run: None,
             images,
         },
         title: PREPARE_PATCH_TITLE,

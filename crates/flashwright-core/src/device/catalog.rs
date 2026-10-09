@@ -58,6 +58,8 @@ pub struct DeviceRow {
     pub model: Option<String>,
     pub has_init_boot: bool,
     pub patch_partition: Partition,
+    /// Gate id from the device catalogue. Present when a boot-image mismatch is that phone's rule.
+    pub boot_gate: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -83,6 +85,7 @@ impl DeviceTable {
                     model: row.model,
                     has_init_boot: row.has_init_boot,
                     patch_partition,
+                    boot_gate: row.boot_gate,
                 })
             })
             .collect::<Result<Vec<_>, DeviceError>>()?;
@@ -92,6 +95,10 @@ impl DeviceTable {
     pub fn get(&self, codename: &str) -> Option<&DeviceRow> {
         let folded = codename.to_ascii_lowercase();
         self.rows.iter().find(|row| row.codename == folded)
+    }
+
+    pub fn rows(&self) -> &[DeviceRow] {
+        &self.rows
     }
 }
 
@@ -174,6 +181,8 @@ struct DeviceRowFile {
     model: Option<String>,
     has_init_boot: bool,
     patch_partition: String,
+    #[serde(default)]
+    boot_gate: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

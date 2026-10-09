@@ -47,7 +47,7 @@ Versions are the ones resolved in `Cargo.lock` on 9 Oct 2026.
 | Item | Source | Licence | Where |
 | --- | --- | --- | --- |
 | Tauri 2.12.2, tauri-build 2.7.1, tauri-plugin-dialog 2.8.1, tauri-plugin-opener 2.7.0, `@tauri-apps/api` 2.12.2, `@tauri-apps/cli` 2.12.1 | https://github.com/tauri-apps/tauri | Apache-2.0 OR MIT | `apps/flashwright-gui` |
-| serde_json 1.0.151 | https://github.com/serde-rs/json | MIT OR Apache-2.0 | `crates/flashwright-wizard` |
+| serde_json 1.0.151 | https://github.com/serde-rs/json | MIT OR Apache-2.0 | `crates/flashwright-core` |
 | serde_jcs 0.1.0 | https://github.com/l1h3r/serde_jcs | MIT OR Apache-2.0 | Plan canonicalisation |
 | sha2 0.10.9, hex 0.4.3 | RustCrypto | MIT OR Apache-2.0 | Plan digest |
 | uuid 1.11.0 | https://github.com/uuid-rs/uuid | MIT OR Apache-2.0 | Plan ids |

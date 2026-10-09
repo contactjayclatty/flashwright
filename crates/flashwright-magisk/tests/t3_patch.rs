@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use flashwright_core::cmd::WorkFile;
 use flashwright_core::device::{Partition, PlatformToolsTransport, TransportConfig};
-use flashwright_core::proc::{Invocation, ScriptedResponse, ScriptedRunner};
+use flashwright_core::proc::{RecordedCall, ScriptedResponse, ScriptedRunner};
 use flashwright_core::wizard::{FixedClock, WizardSession};
 use flashwright_magisk::{
     accept_patch_pull, check_device_space, check_magisk_version, check_patched_sha1, check_region,
@@ -24,6 +24,19 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 const SERIAL: &str = "komodo1";
+const SYNTHETIC_PROPS: &str = "\
+[ro.product.device]: [komodo]
+[ro.boot.flash.locked]: [0]
+[persist.sys.update.pending]: [0]
+[ro.boot.slot_suffix]: [_a]
+[ro.build.version.security_patch]: [2026-02-01]
+[ro.build.id]: [TEST.260201.001]
+[ro.build.fingerprint]: [synthetic/komodo/test]
+[ro.build.date.utc]: [1700000000]
+[ro.build.version.sdk]: [34]
+[ro.bootloader]: [16.2-100]
+[ro.kernel.version]: [6.1.0-android14-synthetic]
+";
 const DUMPS: &str = "\
 Package [com.topjohnwu.magisk]
     codePath=/data/app/~~abc==/com.topjohnwu.magisk-xyz
@@ -104,18 +117,19 @@ async fn unconfirmed_plan_spawns_nothing() {
     assert!(!blob.contains("'su'"));
     assert!(!blob.contains("'pm'"));
     assert!(!blob.contains(" pm "));
+    let observed = runner.calls().len();
     let err = session
-        .confirm_and_run_finally("flp1-not-issued", 0)
+        .confirm_and_run("flp1-not-issued")
         .await
         .unwrap_err();
     assert!(err.to_string().contains("not issued"));
-    assert!(runner.calls().is_empty());
+    assert_eq!(runner.calls().len(), observed);
     let mut dry_session = open(Arc::clone(&runner));
     let dry_preview = dry_session.build_plan(dry).await.unwrap();
     let listed = dry_session.dry_run(&dry_preview.plan_hash).unwrap();
     assert!(listed.iter().any(|line| line.starts_with("WOULD BLOCK:")));
     assert!(listed.iter().all(|line| !line.starts_with("WOULD RUN")));
-    assert!(runner.calls().is_empty());
+    assert_no_patch_writes(&runner.calls());
 }
 
 #[tokio::test]
@@ -137,8 +151,16 @@ async fn confirmed_app_patch_runs_three_times() {
         ))
         .unwrap();
         let preview = session.build_plan(plan.draft).await.unwrap();
+        let planned = preview
+            .steps
+            .iter()
+            .flat_map(|step| step.argv.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!planned.contains("'su'"));
+        assert!(!planned.contains("'pm'"));
         let err = session
-            .confirm_and_run_finally(&preview.plan_hash, 0)
+            .confirm_and_run(&preview.plan_hash)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Blocked"));
@@ -146,14 +168,7 @@ async fn confirmed_app_patch_runs_three_times() {
     let calls = runner.calls();
     assert_eq!(count_shell(&calls, "fl_patch.sh"), 0);
     assert_eq!(count_shell(&calls, "'rm'"), 0);
-    let blob = calls
-        .iter()
-        .flat_map(|call| call.args.iter().cloned())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(!blob.contains("'su'"));
-    assert!(!blob.contains("'pm'"));
-    assert!(!blob.contains(" pm "));
+    assert_no_patch_writes(&calls);
 }
 
 #[tokio::test]
@@ -175,7 +190,7 @@ async fn cleanup_runs_after_a_script_failure() {
     .unwrap();
     let preview = session.build_plan(plan.draft).await.unwrap();
     let err = session
-        .confirm_and_run_finally(&preview.plan_hash, 0)
+        .confirm_and_run(&preview.plan_hash)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("Blocked"));
@@ -361,23 +376,49 @@ fn the_pc_parser_checks_the_ramdisk() {
         stock.sha256_hex(),
         stock.sha1_hex()
     );
+    let component = b"echo synthetic-component\n";
+    let apk = zip_with(&[("assets/boot_patch.sh", component)]);
+    let component_sha = hex(Sha256::digest(component));
+    let bound = [flashwright_magisk::BoundComponent {
+        archive_path: "assets/boot_patch.sh",
+        sha256: &component_sha,
+    }];
     let accepted = accept_patch_pull(PatchPull {
         script_text: &script,
         pull_text: "1 file pulled\n",
         patched: &image,
-        apk: b"base-apk",
+        apk: &apk,
+        components: &bound,
         stock_sha1: stock.sha1_hex(),
         stock_sha256: stock.sha256_hex(),
         plan_hash: "flp1-parser",
     })
     .unwrap();
     assert_eq!(accepted.apk_sha256.len(), 64);
+    let wrong_sha = "ab".repeat(32);
+    let unbound = [flashwright_magisk::BoundComponent {
+        archive_path: "assets/boot_patch.sh",
+        sha256: &wrong_sha,
+    }];
+    let mismatch = accept_patch_pull(PatchPull {
+        script_text: &script,
+        pull_text: "1 file pulled\n",
+        patched: &image,
+        apk: &apk,
+        components: &unbound,
+        stock_sha1: stock.sha1_hex(),
+        stock_sha256: stock.sha256_hex(),
+        plan_hash: "flp1-parser",
+    })
+    .unwrap_err();
+    assert!(mismatch.to_string().contains("G25"), "{mismatch}");
     assert!(accept_patch_pull(PatchPull {
         script_text:
             "FL_STOCK_SHA256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n",
         pull_text: "1 file pulled\n",
         patched: &image,
-        apk: b"base-apk",
+        apk: &apk,
+        components: &bound,
         stock_sha1: stock.sha1_hex(),
         stock_sha256: stock.sha256_hex(),
         plan_hash: "flp1-parser",
@@ -387,7 +428,8 @@ fn the_pc_parser_checks_the_ramdisk() {
         script_text: &script,
         pull_text: "",
         patched: &image,
-        apk: b"base-apk",
+        apk: &apk,
+        components: &bound,
         stock_sha1: stock.sha1_hex(),
         stock_sha256: stock.sha256_hex(),
         plan_hash: "flp1-parser",
@@ -652,18 +694,42 @@ fn script(runner: &ScriptedRunner, patch_ok: bool) {
         stock.sha256_hex()
     );
     let name = if cfg!(windows) { "adb.exe" } else { "adb" };
+    let fastboot = if cfg!(windows) {
+        "fastboot.exe"
+    } else {
+        "fastboot"
+    };
+    runner.on(
+        name,
+        &["devices", "-l"],
+        ScriptedResponse::ok(format!("List of devices attached\n{SERIAL} device\n")),
+    );
+    runner.on(fastboot, &["devices", "-l"], ScriptedResponse::ok(""));
     runner.on_fn(name, &["-s", SERIAL], move |invocation, _| {
         route(invocation, patch_ok, &lines)
     });
 }
 
-fn route(invocation: &Invocation, patch_ok: bool, lines: &str) -> ScriptedResponse {
+fn assert_no_patch_writes(calls: &[RecordedCall]) {
+    let blob = calls
+        .iter()
+        .flat_map(|call| call.args.iter().cloned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!blob.contains("fl_patch.sh"));
+    assert!(!blob.contains("push"));
+    assert!(!blob.contains("'pm'"));
+}
+
+fn route(invocation: &RecordedCall, patch_ok: bool, lines: &str) -> ScriptedResponse {
     match invocation.args.get(2).map(String::as_str) {
         Some("push") => ScriptedResponse::ok("1 file pushed\n"),
         Some("pull") => ScriptedResponse::ok(""),
         Some("shell") => {
             let remote = invocation.args.get(3).map(String::as_str).unwrap_or("");
-            if remote.contains("fl_patch.sh") {
+            if remote.contains("getprop") {
+                ScriptedResponse::ok(SYNTHETIC_PROPS)
+            } else if remote.contains("fl_patch.sh") {
                 if patch_ok {
                     ScriptedResponse::ok(lines.to_string())
                 } else {
@@ -686,7 +752,7 @@ fn route(invocation: &Invocation, patch_ok: bool, lines: &str) -> ScriptedRespon
     }
 }
 
-fn count_shell(calls: &[Invocation], needle: &str) -> usize {
+fn count_shell(calls: &[RecordedCall], needle: &str) -> usize {
     calls
         .iter()
         .filter(|call| {

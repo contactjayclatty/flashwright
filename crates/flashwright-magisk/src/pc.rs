@@ -5,9 +5,12 @@
 //!
 //! The check is a read-only parse. It does not run magiskboot.
 
+use std::io::{Cursor, Read};
+
 use flashwright_bootimg::{BootError, BoundInspection};
 use flashwright_core::parse::{self, Verdict};
 use sha2::{Digest, Sha256};
+use zip::ZipArchive;
 
 use crate::gates::check_patched_sha1;
 use crate::MagiskError;
@@ -20,12 +23,19 @@ pub struct PatchedCheck<'a> {
     pub plan_hash: &'a str,
 }
 
+/// One pushed file and the hash that must be inside the pulled APK.
+pub struct BoundComponent<'a> {
+    pub archive_path: &'a str,
+    pub sha256: &'a str,
+}
+
 /// Script output plus the pulled patched image and the pulled APK.
 pub struct PatchPull<'a> {
     pub script_text: &'a str,
     pub pull_text: &'a str,
     pub patched: &'a [u8],
     pub apk: &'a [u8],
+    pub components: &'a [BoundComponent<'a>],
     pub stock_sha1: &'a str,
     pub stock_sha256: &'a str,
     pub plan_hash: &'a str,
@@ -49,6 +59,7 @@ pub fn accept_patch_pull(pull: PatchPull<'_>) -> Result<PatchAcceptance, MagiskE
     if !reported.eq_ignore_ascii_case(pull.stock_sha256) {
         return Err(MagiskError::PatchedSha1);
     }
+    bind_components(pull.apk, pull.components)?;
     let inspection = validate_patched_init_boot(PatchedCheck {
         patched: pull.patched,
         stock_sha1: pull.stock_sha1,
@@ -80,9 +91,39 @@ pub fn validate_patched_init_boot(check: PatchedCheck<'_>) -> Result<BoundInspec
 }
 
 /// Parser report plus the hash of the APK that was pulled.
+#[derive(Debug)]
 pub struct PatchAcceptance {
     pub inspection: BoundInspection,
     pub apk_sha256: String,
+}
+
+/// Gate G25: every pushed component hash has to equal that entry in the pulled APK.
+fn bind_components(apk: &[u8], components: &[BoundComponent<'_>]) -> Result<(), MagiskError> {
+    if components.is_empty() {
+        return Err(MagiskError::Message(
+            "G25 pushed components are not bound to the pulled APK".into(),
+        ));
+    }
+    let mut archive = ZipArchive::new(Cursor::new(apk)).map_err(|_| {
+        MagiskError::Message("G25 the pulled APK does not match the pushed components".into())
+    })?;
+    for component in components {
+        let mut file = archive.by_name(component.archive_path).map_err(|_| {
+            MagiskError::Message("G25 the pulled APK does not match the pushed components".into())
+        })?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(|_| {
+            MagiskError::Message("G25 the pulled APK does not match the pushed components".into())
+        })?;
+        if bytes.len() > 8 * 1024 * 1024
+            || !hex_sha256(&bytes).eq_ignore_ascii_case(component.sha256)
+        {
+            return Err(MagiskError::Message(
+                "G25 the pulled APK does not match the pushed components".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {

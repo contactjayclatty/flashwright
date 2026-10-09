@@ -17,12 +17,12 @@ pub use cache::{offer, store, PatchCacheMeta};
 pub use extract::{extract_apk_components, DeviceAbi, ExtractedComponent};
 pub use gates::{
     check_device_space, check_magisk_version, check_patched_sha1, check_region, data_free_bytes,
-    embedded_known_bad, komodo_has_init_boot, patch_partition, KOMODO, LATE_SPL,
-    MIN_CODE_FOR_LATE_SPL,
+    embedded_known_bad, komodo_has_init_boot, patch_partition, LATE_SPL, MIN_CODE_FOR_LATE_SPL,
 };
 pub use image::{ExtractedBootImage, SyntheticInitBoot};
 pub use pc::{
-    accept_patch_pull, validate_patched_init_boot, PatchAcceptance, PatchPull, PatchedCheck,
+    accept_patch_pull, validate_patched_init_boot, BoundComponent, PatchAcceptance, PatchPull,
+    PatchedCheck,
 };
 pub use plan::{
     components_from_extract, detection_log, official_base_apk, phone_version_code, plan_app_patch,

@@ -11,10 +11,24 @@ use sha2::{Digest, Sha256};
 
 use crate::proc::ProcError;
 
+/// How a path became a [`VerifiedExe`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Trust {
+    /// Hashed regular file whose name is adb or fastboot. Writes stay off
+    /// until an allow-list entry matches.
+    Measured,
+    /// Digest matches an allow-list entry.
+    AllowListed,
+    /// The path is not on disk. Only the scripted runner accepts this.
+    Scripted,
+}
+
 /// Absolute path plus the SHA-256 measured for it.
+#[derive(Clone, Debug)]
 pub struct VerifiedExe {
     path: PathBuf,
     sha256: String,
+    trust: Trust,
 }
 
 impl VerifiedExe {
@@ -25,6 +39,16 @@ impl VerifiedExe {
     pub fn sha256(&self) -> &str {
         &self.sha256
     }
+
+    pub(crate) fn trust(&self) -> Trust {
+        self.trust
+    }
+
+    /// Real spawn accepts only a measured or allow-listed adb or fastboot.
+    pub(crate) fn admits_system_spawn(&self) -> bool {
+        matches!(self.trust, Trust::Measured | Trust::AllowListed)
+            && is_platform_tool(&file_name(&self.path))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -33,36 +57,70 @@ pub struct ListenerImage {
     pub sha256: String,
 }
 
-/// Host utility such as `echo` or `where.exe`. Platform-tools names are refused.
-pub(crate) fn host_utility(path: &Path) -> Result<VerifiedExe, ProcError> {
+/// Hash a regular adb or fastboot file without consulting the allow list.
+///
+/// Symlinks fail `O_NOFOLLOW`. Any other name, including a helper that points
+/// at a shell or an interpreter, is refused.
+pub(crate) fn measure_platform_tool(path: &Path) -> Result<VerifiedExe, ProcError> {
     reject_path(path)?;
     let name = file_name(path);
-    if is_platform_tool(&name) {
+    if !is_platform_tool(&name) {
         return Err(ProcError::Unverified {
-            detail: format!("{name} must be a verified platform-tools binary"),
+            detail: format!("{name} is not an allow-listed platform-tools path"),
         });
     }
-    let sha256 = hash_path(path)?;
+    let mut file = open_share_read(path)?;
+    let sha256 = hash_file(&mut file)?;
     Ok(VerifiedExe {
         path: path.to_path_buf(),
         sha256,
+        trust: Trust::Measured,
     })
 }
 
 /// Managed adb or fastboot whose digest matches the allow-list entry.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn platform_tool(path: &Path, expected_sha256: &str) -> Result<VerifiedExe, ProcError> {
-    reject_path(path)?;
-    let sha256 = hash_path(path)?;
-    if !sha256.eq_ignore_ascii_case(expected_sha256) {
+    let measured = measure_platform_tool(path)?;
+    if !measured.sha256.eq_ignore_ascii_case(expected_sha256) {
         return Err(ProcError::Unverified {
             detail: "platform-tools file hash does not match the allow list".into(),
         });
     }
     Ok(VerifiedExe {
-        path: path.to_path_buf(),
-        sha256,
+        path: measured.path,
+        sha256: measured.sha256,
+        trust: Trust::AllowListed,
     })
+}
+
+/// Placeholder for a scripted path that is not on disk.
+pub(crate) fn scripted_tool(path: &Path) -> Result<VerifiedExe, ProcError> {
+    if !path.is_absolute() {
+        return Err(ProcError::ProgramNotAbsolute);
+    }
+    let name = file_name(path);
+    if is_forbidden_program_name(&name) {
+        return Err(ProcError::ShellForbidden { name });
+    }
+    Ok(VerifiedExe {
+        path: path.to_path_buf(),
+        sha256: String::new(),
+        trust: Trust::Scripted,
+    })
+}
+
+/// Installed allow-listed tool, else a measured platform-tools file, else a
+/// scripted placeholder when the path is absent.
+pub(crate) fn resolve_tool(path: &Path) -> Result<VerifiedExe, ProcError> {
+    if path.exists() {
+        measure_platform_tool(path)
+    } else {
+        scripted_tool(path)
+    }
+}
+
+fn is_forbidden_program_name(name: &str) -> bool {
+    crate::proc::is_forbidden_program(name)
 }
 
 /// Open each path read-only and shared for read, then hash through the handle.
@@ -151,11 +209,6 @@ fn has_ads(text: &str) -> bool {
         rest
     };
     rest.contains(':')
-}
-
-fn hash_path(path: &Path) -> Result<String, ProcError> {
-    let mut file = File::open(path).map_err(|source| ProcError::spawn(path, source))?;
-    hash_file(&mut file)
 }
 
 fn hash_file(file: &mut File) -> Result<String, ProcError> {

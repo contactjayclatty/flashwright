@@ -14,8 +14,8 @@ libfuzzer-sys = "0.4"
 path = ".."
 
 [[bin]]
-name = "inspect"
-path = "fuzz_targets/inspect.rs"
+name = "ramdisk"
+path = "fuzz_targets/ramdisk.rs"
 test = false
 doc = false
 bench = false

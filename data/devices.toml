@@ -20,3 +20,5 @@ codename = "komodo"
 model = "Pixel 9 Pro XL"
 has_init_boot = true
 patch_partition = "init_boot"
+# G23: this phone's patch partition is init_boot. A boot image is refused.
+boot_gate = "G23"

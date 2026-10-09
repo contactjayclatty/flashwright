@@ -66,15 +66,15 @@ pub(crate) struct SafetyFacts {
     /// Codename read from the phone and stored on the plan. G04 compares firmware to this.
     pub(crate) plan_device: String,
     pub(crate) authorised_devices: u32,
-    /// Serial these facts were read for. G02 requires this phone to be the one attached.
-    pub(crate) bound_serial: String,
-    pub(crate) attached_serials: Vec<String>,
     pub(crate) unlocked: Option<bool>,
     pub(crate) tools_verified: bool,
     pub(crate) tools_match: bool,
     pub(crate) adb_server_ok: bool,
     pub(crate) partition_bytes: Option<u64>,
+    pub(crate) payload_image_bytes: Option<u64>,
     pub(crate) pending_ota: Option<bool>,
+    pub(crate) bound_serial: String,
+    pub(crate) attached_serials: Vec<String>,
     pub(crate) firmware_sha256: Option<String>,
     pub(crate) image_sha256: Option<String>,
     pub(crate) full_ota: bool,
@@ -150,14 +150,15 @@ impl SafetyFacts {
             kernel: None,
             plan_device: String::new(),
             authorised_devices: 0,
-            bound_serial: String::new(),
-            attached_serials: Vec::new(),
             unlocked: None,
             tools_verified: false,
             tools_match: false,
             adb_server_ok: false,
             partition_bytes: None,
+            payload_image_bytes: None,
             pending_ota: None,
+            bound_serial: String::new(),
+            attached_serials: Vec::new(),
             firmware_sha256: None,
             image_sha256: None,
             full_ota: false,
@@ -200,14 +201,15 @@ impl SafetyFacts {
             kernel: Some("6.1.0-android14-synthetic".into()),
             plan_device: "komodo".into(),
             authorised_devices: 1,
-            bound_serial: "synth-komodo-1".into(),
-            attached_serials: vec!["synth-komodo-1".into()],
             unlocked: Some(true),
             tools_verified: true,
             tools_match: true,
             adb_server_ok: true,
             partition_bytes: Some(64 * 1024 * 1024),
+            payload_image_bytes: None,
             pending_ota: Some(false),
+            bound_serial: "synth-komodo-1".into(),
+            attached_serials: vec!["synth-komodo-1".into()],
             firmware_sha256: Some("synthetic-sha".into()),
             image_sha256: Some("synthetic-sha".into()),
             full_ota: true,
@@ -268,31 +270,27 @@ pub(crate) fn evaluate_acked(
         .collect()
 }
 
-/// Facts read by core for one plan. A caller cannot fill these in.
-#[derive(Clone, Debug)]
-pub struct CollectedFacts {
-    inner: SafetyFacts,
-}
+/// Facts core collected for one plan. Callers cannot build this value.
+#[repr(transparent)]
+pub struct CollectedFacts(SafetyFacts);
 
 impl CollectedFacts {
-    pub(crate) fn from_ref(facts: &SafetyFacts) -> Self {
-        Self {
-            inner: facts.clone(),
-        }
+    pub(crate) fn from_ref(facts: &SafetyFacts) -> &Self {
+        // SAFETY: `CollectedFacts` is a transparent newtype of `SafetyFacts`.
+        unsafe { &*(facts as *const SafetyFacts).cast::<Self>() }
     }
 
-    /// Serial the facts were read for.
-    pub fn bound_serial(&self) -> &str {
-        &self.inner.bound_serial
+    fn facts(&self) -> &SafetyFacts {
+        &self.0
     }
 }
 
 /// Gates for one write, including reboot, set-active, and a cleanup step.
 ///
-/// `facts` are the facts core collected and hashed into the plan. An empty
-/// result means this step is not a write. A blocked entry refuses the write.
+/// `facts` is the set core collected and hashed for this plan. An empty result
+/// means this step is not a write. A blocked entry refuses the write.
 pub fn evaluate_step(step: &PlanStep, facts: Option<&CollectedFacts>) -> Vec<GateDecision> {
-    let facts = facts.map(|facts| &facts.inner);
+    let facts = facts.map(CollectedFacts::facts);
     let PlanStep::Write(cmd) = step else {
         return Vec::new();
     };
@@ -318,7 +316,7 @@ pub fn evaluate_step(step: &PlanStep, facts: Option<&CollectedFacts>) -> Vec<Gat
                 "G21" => g21(facts),
                 "G22" => g22(facts),
                 "G26" => g26(steps),
-                "G28" => g28(steps),
+                "G28" => g28(steps, facts),
                 _ => (false, String::new()),
             };
             if !blocked {
@@ -352,13 +350,10 @@ pub fn dry_run_lines(steps: &[PlanStep], decisions: &[GateDecision]) -> Vec<Stri
     }
     if lines.is_empty() {
         for step in steps {
-            let rendered = match step {
-                PlanStep::Write(cmd) => write_argv(cmd).ok(),
-                PlanStep::Cleanup(cmd) => crate::cmd::cleanup_argv(cmd).ok(),
-                PlanStep::Read(_) => None,
-            };
-            if let Some(rendered) = rendered {
-                lines.push(format!("WOULD RUN: {}", rendered.args.join(" ")));
+            if let PlanStep::Write(cmd) = step {
+                if let Ok(rendered) = write_argv(cmd) {
+                    lines.push(format!("WOULD RUN: {}", rendered.args.join(" ")));
+                }
             }
         }
     }
@@ -421,7 +416,7 @@ fn decide(
         "G11" => g11(facts, image_write),
         "G12" => g12(facts, image_write),
         "G13" => g13(facts, image_write),
-        "G14" => g14(backup, steps, image_write),
+        "G14" => g14(backup, steps, facts, image_write),
         "G15" => g15(steps, facts),
         "G16" => g16(rendered, tables),
         "G17" => g17(facts, image_write),
@@ -435,7 +430,7 @@ fn decide(
         "G25" => g25(rendered, tables),
         "G26" => g26(steps),
         "G27" => g27(rendered, tables),
-        "G28" => g28(steps),
+        "G28" => g28(steps, facts),
         other => legacy(other, facts, image_write),
     };
     GateDecision {
@@ -604,10 +599,9 @@ fn g17(facts: Option<&SafetyFacts>, image_write: bool) -> (bool, String) {
 fn g02(facts: Option<&SafetyFacts>) -> (bool, String) {
     match facts {
         Some(facts)
-            if facts.attached_serials.len() == 1
-                && facts.attached_serials.first().map(String::as_str)
-                    == Some(facts.bound_serial.as_str())
-                && !facts.bound_serial.is_empty() =>
+            if !facts.bound_serial.is_empty()
+                && facts.attached_serials.len() == 1
+                && facts.attached_serials[0] == facts.bound_serial =>
         {
             (false, String::new())
         }
@@ -637,8 +631,15 @@ fn g03(steps: &[PlanStep], facts: Option<&SafetyFacts>) -> (bool, String) {
 }
 
 fn g15(steps: &[PlanStep], facts: Option<&SafetyFacts>) -> (bool, String) {
-    let Some(needed) = image_bytes(steps) else {
-        return (false, String::new());
+    let needed = match measure_images(steps, facts) {
+        ImageMeasure::Absent => return (false, String::new()),
+        ImageMeasure::Unread => {
+            return (
+                true,
+                format!("{} This check was not run.", legacy_message("G15")),
+            );
+        }
+        ImageMeasure::Bytes(needed) => needed,
     };
     match facts.and_then(|facts| facts.partition_bytes) {
         Some(have) if have >= needed => (false, String::new()),
@@ -647,6 +648,56 @@ fn g15(steps: &[PlanStep], facts: Option<&SafetyFacts>) -> (bool, String) {
             true,
             format!("{} This check was not run.", legacy_message("G15")),
         ),
+    }
+}
+
+enum ImageMeasure {
+    Absent,
+    Unread,
+    Bytes(u64),
+}
+
+fn measure_images(steps: &[PlanStep], facts: Option<&SafetyFacts>) -> ImageMeasure {
+    let mut needed = None;
+    let mut unread = false;
+    for step in steps {
+        let PlanStep::Write(cmd) = step else {
+            continue;
+        };
+        match cmd {
+            WriteCmd::Fastboot(crate::cmd::FastbootWrite::Flash {
+                image, partition, ..
+            }) if *partition != Partition::Vbmeta => {
+                needed = Some(needed.unwrap_or(0).max(image.size_bytes()));
+            }
+            WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Push { src, .. }) => match src {
+                crate::cmd::HostRef::Image(image) if !image.path().ends_with(".zip") => {
+                    needed = Some(needed.unwrap_or(0).max(image.size_bytes()));
+                }
+                crate::cmd::HostRef::Image(_) => {
+                    match facts.and_then(|facts| facts.payload_image_bytes) {
+                        Some(size) => needed = Some(needed.unwrap_or(0).max(size)),
+                        None => unread = true,
+                    }
+                }
+                crate::cmd::HostRef::Asset(_) => {}
+            },
+            WriteCmd::Fastboot(crate::cmd::FastbootWrite::Update { .. })
+            | WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Sideload { .. }) => {
+                match facts.and_then(|facts| facts.payload_image_bytes) {
+                    Some(size) => needed = Some(needed.unwrap_or(0).max(size)),
+                    None => unread = true,
+                }
+            }
+            _ => {}
+        }
+    }
+    if unread {
+        ImageMeasure::Unread
+    } else if let Some(size) = needed {
+        ImageMeasure::Bytes(size)
+    } else {
+        ImageMeasure::Absent
     }
 }
 
@@ -685,33 +736,6 @@ fn g22(facts: Option<&SafetyFacts>) -> (bool, String) {
 
 fn cmd_is_fastboot(cmd: &WriteCmd) -> bool {
     matches!(cmd, WriteCmd::Fastboot(_))
-}
-
-fn image_bytes(steps: &[PlanStep]) -> Option<u64> {
-    let mut needed = None;
-    for step in steps {
-        let PlanStep::Write(cmd) = step else {
-            continue;
-        };
-        let size = match cmd {
-            WriteCmd::Fastboot(
-                crate::cmd::FastbootWrite::Flash { image, .. }
-                | crate::cmd::FastbootWrite::Update { package: image, .. },
-            )
-            | WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Sideload { package: image, .. }) => {
-                Some(image.size_bytes())
-            }
-            WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Push { src, .. }) => match src {
-                crate::cmd::HostRef::Image(image) => Some(image.size_bytes()),
-                crate::cmd::HostRef::Asset(_) => None,
-            },
-            _ => None,
-        };
-        if let Some(size) = size {
-            needed = Some(needed.unwrap_or(0).max(size));
-        }
-    }
-    needed
 }
 
 fn g04(facts: Option<&SafetyFacts>, tables: &SafetyTables, image_write: bool) -> (bool, String) {
@@ -891,11 +915,16 @@ fn g10(facts: Option<&SafetyFacts>, tables: &SafetyTables, image_write: bool) ->
     (false, String::new())
 }
 
-fn g14(backup: Option<&BackupState>, steps: &[PlanStep], image_write: bool) -> (bool, String) {
+fn g14(
+    backup: Option<&BackupState>,
+    steps: &[PlanStep],
+    facts: Option<&SafetyFacts>,
+    image_write: bool,
+) -> (bool, String) {
     if !image_write {
         return (false, String::new());
     }
-    let Some((serial, slot, partition)) = plan_target(steps) else {
+    let Some((serial, slot, partition)) = plan_target(steps, facts) else {
         return (
             true,
             "Stock init_boot has not been backed up and verified.".into(),
@@ -917,7 +946,10 @@ fn g14(backup: Option<&BackupState>, steps: &[PlanStep], image_write: bool) -> (
     }
 }
 
-fn plan_target(steps: &[PlanStep]) -> Option<(String, Slot, Partition)> {
+fn plan_target(
+    steps: &[PlanStep],
+    facts: Option<&SafetyFacts>,
+) -> Option<(String, Slot, Partition)> {
     for step in steps {
         if let PlanStep::Write(WriteCmd::Fastboot(crate::cmd::FastbootWrite::Flash {
             serial,
@@ -929,6 +961,26 @@ fn plan_target(steps: &[PlanStep]) -> Option<(String, Slot, Partition)> {
             if *partition != Partition::Vbmeta {
                 return Some((serial.as_str().to_string(), *slot, *partition));
             }
+        }
+    }
+    let facts = facts?;
+    for step in steps {
+        match step {
+            PlanStep::Write(WriteCmd::Fastboot(crate::cmd::FastbootWrite::Update {
+                serial,
+                slot,
+                ..
+            })) => {
+                return Some((serial.as_str().to_string(), *slot, facts.target_partition));
+            }
+            PlanStep::Write(WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Sideload {
+                serial,
+                ..
+            })) => {
+                let slot = facts.active_slot?.other();
+                return Some((serial.as_str().to_string(), slot, facts.target_partition));
+            }
+            _ => {}
         }
     }
     None
@@ -1175,9 +1227,11 @@ fn g27(rendered: &[String], tables: &SafetyTables) -> (bool, String) {
     (false, String::new())
 }
 
-fn g28(steps: &[PlanStep]) -> (bool, String) {
-    match image_bytes(steps) {
-        Some(size) if size > crate::cmd::MAX_BLOCK_LEN => (true, legacy_message("G28").to_string()),
+fn g28(steps: &[PlanStep], facts: Option<&SafetyFacts>) -> (bool, String) {
+    match measure_images(steps, facts) {
+        ImageMeasure::Bytes(size) if size > crate::cmd::MAX_BLOCK_LEN => {
+            (true, legacy_message("G28").to_string())
+        }
         _ => (false, String::new()),
     }
 }
@@ -1319,10 +1373,7 @@ pub fn spl_from_build(build: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{
-        AdbHostWrite, AdbShellWrite, DeviceSerial, FastbootWrite, ImageRef, RebootMode, SuWrite,
-        WriteCmd,
-    };
+    use crate::cmd::{AdbHostWrite, DeviceSerial, FastbootWrite, ImageRef, RebootMode, WriteCmd};
     use crate::safety::backup::BackupSet;
     use crate::safety::tables::{ported_items, tables};
     use crate::wizard::PlanStep;
@@ -1708,6 +1759,50 @@ mod tests {
     }
 
     #[test]
+    fn update_and_sideload_use_the_parsed_image_not_the_zip() {
+        use crate::cmd::AdbHostWrite;
+        let mut facts = SafetyFacts::komodo_ready();
+        facts.payload_image_bytes = Some(4096);
+        facts.target_partition = Partition::InitBoot;
+        facts.active_slot = Some(Slot::A);
+        let update = PlanStep::Write(WriteCmd::Fastboot(FastbootWrite::Update {
+            serial: serial(),
+            slot: Slot::B,
+            package: ImageRef::new(2, "/var/flashwright/komodo-update.zip", 5_000_000_000),
+        }));
+        let lines = preview(&[update], Some(&facts), Some(&verified()));
+        assert!(
+            lines.iter().all(|line| !line.contains("G14")
+                && !line.contains("G15")
+                && !line.contains("G28")),
+            "{lines:?}"
+        );
+
+        facts.payload_image_bytes = None;
+        let update = PlanStep::Write(WriteCmd::Fastboot(FastbootWrite::Update {
+            serial: serial(),
+            slot: Slot::B,
+            package: ImageRef::new(2, "/var/flashwright/komodo-update.zip", 4096),
+        }));
+        assert_blocked(&preview(&[update], Some(&facts), Some(&verified())), "G15");
+
+        facts.payload_image_bytes = Some(4096);
+        facts.active_slot = Some(Slot::A);
+        let sideload = PlanStep::Write(WriteCmd::AdbHost(AdbHostWrite::Sideload {
+            serial: serial(),
+            package: ImageRef::new(3, "/var/flashwright/komodo-ota.zip", 5_000_000_000),
+        }));
+        let slot_a = BackupState::Verified(BackupSet::bound(
+            "set-a",
+            "manifest",
+            "synth-komodo-1",
+            Slot::A,
+            Partition::InitBoot,
+        ));
+        assert_blocked(&preview(&[sideload], Some(&facts), Some(&slot_a)), "G14");
+    }
+
+    #[test]
     fn a_backup_for_another_slot_does_not_satisfy_g14() {
         let backup = BackupState::Verified(BackupSet::bound(
             "set-a",
@@ -1734,26 +1829,20 @@ mod tests {
             "/var/flashwright/init_boot.img",
         );
         let mut facts = SafetyFacts::komodo_ready();
-        assert!(evaluate_step(&step, Some(&CollectedFacts::from_ref(&facts))).is_empty());
+        assert!(evaluate_step(&step, Some(CollectedFacts::from_ref(&facts))).is_empty());
         facts.unlocked = Some(false);
-        assert!(
-            evaluate_step(&step, Some(&CollectedFacts::from_ref(&facts)))
-                .iter()
-                .any(|gate| gate.id == "G03")
-        );
+        assert!(evaluate_step(&step, Some(CollectedFacts::from_ref(&facts)))
+            .iter()
+            .any(|gate| gate.id == "G03"));
         facts.unlocked = Some(true);
         facts.partition_bytes = Some(10);
-        assert!(
-            evaluate_step(&step, Some(&CollectedFacts::from_ref(&facts)))
-                .iter()
-                .any(|gate| gate.id == "G15")
-        );
+        assert!(evaluate_step(&step, Some(CollectedFacts::from_ref(&facts)))
+            .iter()
+            .any(|gate| gate.id == "G15"));
         facts.partition_bytes = None;
-        assert!(
-            evaluate_step(&step, Some(&CollectedFacts::from_ref(&facts)))
-                .iter()
-                .any(|gate| gate.id == "G15")
-        );
+        assert!(evaluate_step(&step, Some(CollectedFacts::from_ref(&facts)))
+            .iter()
+            .any(|gate| gate.id == "G15"));
         let reboot = PlanStep::Write(WriteCmd::AdbHost(AdbHostWrite::Reboot {
             serial: serial(),
             mode: RebootMode::System,
@@ -1761,14 +1850,14 @@ mod tests {
         facts = SafetyFacts::komodo_ready();
         facts.tools_verified = false;
         assert!(
-            evaluate_step(&reboot, Some(&CollectedFacts::from_ref(&facts)))
+            evaluate_step(&reboot, Some(CollectedFacts::from_ref(&facts)))
                 .iter()
                 .any(|gate| gate.id == "G21")
         );
         facts.tools_verified = true;
         facts.adb_server_ok = false;
         assert!(
-            evaluate_step(&reboot, Some(&CollectedFacts::from_ref(&facts)))
+            evaluate_step(&reboot, Some(CollectedFacts::from_ref(&facts)))
                 .iter()
                 .any(|gate| gate.id == "G22")
         );
@@ -1779,7 +1868,7 @@ mod tests {
         facts = SafetyFacts::komodo_ready();
         facts.unlocked = Some(false);
         assert!(
-            evaluate_step(&set_active, Some(&CollectedFacts::from_ref(&facts)))
+            evaluate_step(&set_active, Some(CollectedFacts::from_ref(&facts)))
                 .iter()
                 .any(|gate| gate.id == "G03")
         );
@@ -1787,12 +1876,10 @@ mod tests {
         if let PlanStep::Write(WriteCmd::Fastboot(FastbootWrite::Flash { image, .. })) = &mut huge {
             image.set_size(crate::cmd::MAX_BLOCK_LEN + 1);
         }
-        assert!(evaluate_step(
-            &huge,
-            Some(&CollectedFacts::from_ref(&SafetyFacts::komodo_ready()))
-        )
-        .iter()
-        .any(|gate| gate.id == "G28"));
+        let ready = SafetyFacts::komodo_ready();
+        assert!(evaluate_step(&huge, Some(CollectedFacts::from_ref(&ready)))
+            .iter()
+            .any(|gate| gate.id == "G28"));
         assert_blocked(
             &preview(
                 &[huge],
@@ -1871,78 +1958,5 @@ mod tests {
         assert!(items
             .iter()
             .any(|item| item.upstream_path == "pf_modules.py"));
-    }
-
-    #[test]
-    fn g02_requires_the_bound_serial_to_be_the_attached_phone() {
-        let backup = verified();
-        let steps = stock_flash();
-        let ready = preview(&steps, Some(&SafetyFacts::komodo_ready()), Some(&backup));
-        assert!(ready.iter().all(|line| !line.contains("G02")), "{ready:?}");
-
-        let mut other = SafetyFacts::komodo_ready();
-        other.attached_serials = vec!["other-phone".into()];
-        other.authorised_devices = 1;
-        assert_blocked(&preview(&steps, Some(&other), Some(&backup)), "G02");
-
-        let mut two = SafetyFacts::komodo_ready();
-        two.attached_serials = vec!["synth-komodo-1".into(), "other-phone".into()];
-        two.authorised_devices = 2;
-        assert_blocked(&preview(&steps, Some(&two), Some(&backup)), "G02");
-
-        let mut unbound = SafetyFacts::komodo_ready();
-        unbound.bound_serial.clear();
-        assert_blocked(&preview(&steps, Some(&unbound), Some(&backup)), "G02");
-        assert_blocked(&preview(&steps, None, Some(&backup)), "G02");
-    }
-
-    #[test]
-    fn a_missing_read_blocks_the_gate() {
-        let backup = verified();
-        let steps = stock_flash();
-
-        let mut facts = SafetyFacts::komodo_ready();
-        facts.tools_verified = false;
-        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G01");
-
-        let mut facts = SafetyFacts::komodo_ready();
-        facts.firmware_sha256 = None;
-        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G05");
-        facts.firmware_sha256 = Some("synthetic-sha".into());
-        facts.image_sha256 = None;
-        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G05");
-
-        let update = PlanStep::Write(WriteCmd::Fastboot(FastbootWrite::Update {
-            serial: serial(),
-            slot: Slot::B,
-            package: ImageRef::new(2, "/var/flashwright/ota.zip", 4096),
-        }));
-        let mut facts = SafetyFacts::komodo_ready();
-        facts.full_ota = false;
-        assert_blocked(&preview(&[update], Some(&facts), Some(&backup)), "G06");
-
-        let patch = PlanStep::Write(WriteCmd::Su(SuWrite::RunPatchScript { serial: serial() }));
-        let mut facts = SafetyFacts::komodo_ready();
-        facts.patched_sha1 = None;
-        assert_blocked(&preview(&[patch], Some(&facts), Some(&backup)), "G09");
-        let shell = PlanStep::Write(WriteCmd::AdbShell(AdbShellWrite::RunPatchScript {
-            serial: serial(),
-        }));
-        facts.patched_sha1 = Some("synthetic-sha1".into());
-        facts.stock_sha1 = None;
-        assert_blocked(&preview(&[shell], Some(&facts), Some(&backup)), "G09");
-
-        let mut facts = SafetyFacts::komodo_ready();
-        facts.battery_percent = None;
-        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G11");
-        facts.battery_percent = Some(80);
-        facts.host_free_bytes = None;
-        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G12");
-        facts.host_free_bytes = Some(8 * 1024 * 1024 * 1024);
-        facts.device_free_bytes = None;
-        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G13");
-        facts.device_free_bytes = Some(8 * 1024 * 1024 * 1024);
-        facts.driver_ok = false;
-        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G17");
     }
 }

@@ -52,6 +52,39 @@ fn missing_image(path: &str) -> ImageRef {
 }
 
 fn transport(runner: Arc<ScriptedRunner>) -> PlatformToolsTransport<ScriptedRunner> {
+    let dir = std::env::temp_dir().join(format!(
+        "flashwright-write-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let adb_path = dir.join(adb_name());
+    let fastboot_path = dir.join(fastboot_name());
+    std::fs::write(&adb_path, b"adb-bytes").unwrap();
+    std::fs::write(&fastboot_path, b"fastboot-bytes").unwrap();
+    let adb_hash = sha256_file(&adb_path);
+    let fastboot_hash = sha256_file(&fastboot_path);
+    let adb = platform_tool(&adb_path, &adb_hash).unwrap();
+    let fastboot = platform_tool(&fastboot_path, &fastboot_hash).unwrap();
+    let listener = ListenerImage {
+        path: adb_path.clone(),
+        sha256: adb_hash,
+    };
+    let transport = PlatformToolsTransport::new(
+        runner,
+        adb_path,
+        fastboot_path,
+        TransportConfig::for_tests(),
+    );
+    transport.install_verified(adb, fastboot, Some(listener));
+    transport.note_tools_verdict(true);
+    transport
+}
+
+fn bare_transport(runner: Arc<ScriptedRunner>) -> PlatformToolsTransport<ScriptedRunner> {
     PlatformToolsTransport::new(
         runner,
         tool_path(adb_name()),
@@ -316,8 +349,8 @@ async fn changed_tools_or_a_foreign_adb_server_block_the_write() {
     let _gate = test_gate().await;
     let dir = std::env::temp_dir().join(format!("flashwright-locks-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let adb_path = dir.join("managed-adb");
-    let fastboot_path = dir.join("managed-fastboot");
+    let adb_path = dir.join(adb_name());
+    let fastboot_path = dir.join(fastboot_name());
     std::fs::write(&adb_path, b"adb-bytes").unwrap();
     std::fs::write(&fastboot_path, b"fastboot-bytes").unwrap();
     let adb_hash = sha256_file(&adb_path);
@@ -351,6 +384,163 @@ async fn changed_tools_or_a_foreign_adb_server_block_the_write() {
         path: adb_path,
         sha256: adb_hash,
     };
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_write_without_verified_tools_is_blocked() {
+    let _gate = test_gate().await;
+    let runner = Arc::new(ScriptedRunner::new());
+    let transport = bare_transport(Arc::clone(&runner));
+    let step = WriteCmd::AdbHost(AdbHostWrite::Reboot {
+        serial: serial(),
+        mode: RebootTarget::System,
+    });
+    let token = arm(&transport, &[step]);
+    let err = transport
+        .run_write(
+            &token,
+            WriteCmd::AdbHost(AdbHostWrite::Reboot {
+                serial: serial(),
+                mode: RebootTarget::System,
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("G21"));
+    assert!(runner.calls().is_empty());
+}
+
+#[tokio::test]
+async fn set_active_reads_the_slot_from_stderr() {
+    let _gate = test_gate().await;
+    let runner = Arc::new(ScriptedRunner::new());
+    runner.on(
+        fastboot_name(),
+        &["-s", "pixel1", "--set-active=b"],
+        ScriptedResponse::ok("Setting current slot to 'b'\nOKAY\nFinished. Total time: 0.1s\n"),
+    );
+    runner.on(
+        fastboot_name(),
+        &["-s", "pixel1", "getvar", "current-slot"],
+        ScriptedResponse::ok("Finished. Total time: 0.1s\n")
+            .with_stderr("(bootloader) current-slot: b\n"),
+    );
+    let transport = transport(runner);
+    let step = WriteCmd::Fastboot(FastbootWrite::SetActive {
+        serial: serial(),
+        slot: Slot::B,
+    });
+    let token = arm(&transport, &[step]);
+    transport
+        .fastboot_set_active(&token, "pixel1", Slot::B)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn set_active_does_not_treat_total_as_slot_a() {
+    let _gate = test_gate().await;
+    let runner = Arc::new(ScriptedRunner::new());
+    runner.on(
+        fastboot_name(),
+        &["-s", "pixel1", "--set-active=a"],
+        ScriptedResponse::ok("Setting current slot to 'a'\nOKAY\nFinished. Total time: 0.1s\n"),
+    );
+    runner.on(
+        fastboot_name(),
+        &["-s", "pixel1", "getvar", "current-slot"],
+        ScriptedResponse::ok("Finished. Total time: 0.1s\n")
+            .with_stderr("(bootloader) current-slot: b\n"),
+    );
+    let transport = transport(runner);
+    let step = WriteCmd::Fastboot(FastbootWrite::SetActive {
+        serial: serial(),
+        slot: Slot::A,
+    });
+    let token = arm(&transport, &[step]);
+    let err = transport
+        .fastboot_set_active(&token, "pixel1", Slot::A)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("current-slot"));
+}
+
+#[tokio::test]
+async fn sideload_post_state_reads_stderr() {
+    let _gate = test_gate().await;
+    let runner = Arc::new(ScriptedRunner::new());
+    let package = "/var/flashwright/ota.zip";
+    runner.on(
+        adb_name(),
+        &["-s", "pixel1", "sideload", package],
+        ScriptedResponse::ok("Total xfer: 1.00x\n"),
+    );
+    runner.on(
+        fastboot_name(),
+        &["-s", "pixel1", "getvar", "current-slot"],
+        ScriptedResponse::ok("Finished. Total time: 0.001s\n")
+            .with_stderr("(bootloader) current-slot: b\n"),
+    );
+    runner.on(
+        fastboot_name(),
+        &["-s", "pixel1", "getvar", "slot-unbootable:b"],
+        ScriptedResponse::ok("Finished. Total time: 0.001s\n")
+            .with_stderr("(bootloader) slot-unbootable:b: no\n"),
+    );
+    let transport = transport(runner);
+    let step = WriteCmd::AdbHost(AdbHostWrite::Sideload {
+        serial: serial(),
+        package: missing_image(package),
+    });
+    let token = arm(&transport, &[step]);
+    transport
+        .sideload(
+            &token,
+            "pixel1",
+            std::path::Path::new(package),
+            Slot::B,
+            Slot::A,
+        )
+        .await
+        .unwrap();
+}
+
+#[test]
+fn a_changed_library_fails_the_tool_gate() {
+    let dir = std::env::temp_dir().join(format!(
+        "flashwright-dll-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let adb_path = dir.join(adb_name());
+    let fastboot_path = dir.join(fastboot_name());
+    let dll = dir.join("AdbWinApi.dll");
+    std::fs::write(&adb_path, b"adb-bytes").unwrap();
+    std::fs::write(&fastboot_path, b"fastboot-bytes").unwrap();
+    std::fs::write(&dll, b"dll-v1").unwrap();
+    let adb = platform_tool(&adb_path, &sha256_file(&adb_path)).unwrap();
+    let fastboot = platform_tool(&fastboot_path, &sha256_file(&fastboot_path)).unwrap();
+    let listener = ListenerImage {
+        path: adb_path.clone(),
+        sha256: sha256_file(&adb_path),
+    };
+    let transport = PlatformToolsTransport::new(
+        Arc::new(ScriptedRunner::new()),
+        adb_path,
+        fastboot_path,
+        TransportConfig::for_tests(),
+    );
+    transport.install_verified(adb, fastboot, Some(listener));
+    let (_installed, matched, _server) = transport.tool_gate();
+    assert!(matched);
+    std::fs::write(&dll, b"dll-v2").unwrap();
+    let (_installed, matched, _server) = transport.tool_gate();
+    assert!(!matched);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

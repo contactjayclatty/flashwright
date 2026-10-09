@@ -8,7 +8,6 @@ use flashwright_core::device::{DeviceTable, KnownBadMagisk, Partition};
 use crate::image::{is_hex, ExtractedBootImage};
 use crate::MagiskError;
 
-pub const KOMODO: &str = "komodo";
 pub const MIN_CODE_FOR_LATE_SPL: u32 = 30_600;
 pub const LATE_SPL: &str = "2025-12-01";
 const HEADROOM: u64 = 64 * 1024 * 1024;
@@ -23,7 +22,7 @@ pub fn patch_partition(
         return Err(MagiskError::Message(format!("unknown device {codename}")));
     };
     if image.partition() != row.patch_partition {
-        if codename.eq_ignore_ascii_case(KOMODO) {
+        if row.boot_gate.as_deref() == Some("G23") {
             return Err(MagiskError::KomodoBoot);
         }
         let label = row.model.clone().unwrap_or_else(|| row.codename.clone());
@@ -36,10 +35,16 @@ pub fn patch_partition(
     Ok(row.patch_partition)
 }
 
-/// The LU0 / FIPS region is a hard block. Other region labels pass.
+/// Region labels come from the device catalogue. A match is the whole label.
 pub fn check_region(region: &str) -> Result<(), MagiskError> {
-    let folded = region.trim().to_ascii_uppercase();
-    if folded == "LU0" || folded == "FIPS" || folded == "LU0 / FIPS" || folded == "LU0/FIPS" {
+    let folded = region.trim();
+    let tables = flashwright_core::safety::tables();
+    if tables
+        .off_limits
+        .regions
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(folded))
+    {
         return Err(MagiskError::Lu0Fips);
     }
     Ok(())
@@ -123,7 +128,10 @@ pub fn embedded_known_bad() -> Result<Vec<u32>, MagiskError> {
 
 pub fn komodo_has_init_boot() -> Result<bool, MagiskError> {
     let devices = DeviceTable::embedded().map_err(|err| MagiskError::Message(err.to_string()))?;
-    Ok(devices.get(KOMODO).is_some_and(|row| row.has_init_boot))
+    Ok(devices
+        .rows()
+        .iter()
+        .any(|row| row.boot_gate.as_deref() == Some("G23") && row.has_init_boot))
 }
 
 fn is_date(value: &str) -> bool {

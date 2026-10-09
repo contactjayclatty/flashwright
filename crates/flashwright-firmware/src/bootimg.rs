@@ -109,7 +109,6 @@ fn properties(vbmeta: &[u8]) -> Result<std::collections::BTreeMap<String, String
 }
 
 /// A tiny boot image with an AVB footer. Test fixtures only.
-#[cfg(test)]
 pub fn synthetic_boot(partition: &str, security_patch: &str, fingerprint: &str) -> Vec<u8> {
     let mut image = vec![0u8; 4096];
     image[..8].copy_from_slice(BOOT_MAGIC);
@@ -122,7 +121,6 @@ pub fn synthetic_boot(partition: &str, security_patch: &str, fingerprint: &str) 
     image
 }
 
-#[cfg(test)]
 fn synthetic_vbmeta(partition: &str, security_patch: &str, fingerprint: &str) -> Vec<u8> {
     let descriptors = property_descriptor(
         &format!("com.android.build.{partition}.security_patch"),
@@ -146,7 +144,6 @@ fn synthetic_vbmeta(partition: &str, security_patch: &str, fingerprint: &str) ->
     header
 }
 
-#[cfg(test)]
 fn property_descriptor(key: &str, value: &[u8]) -> Vec<u8> {
     let key_bytes = key.as_bytes();
     let num_following = 16 + key_bytes.len() + 1 + value.len() + 1;
@@ -164,7 +161,6 @@ fn property_descriptor(key: &str, value: &[u8]) -> Vec<u8> {
     out
 }
 
-#[cfg(test)]
 fn synthetic_footer(original: u64, vbmeta_offset: u64, vbmeta_size: u64) -> [u8; FOOTER_LEN] {
     let mut footer = [0u8; FOOTER_LEN];
     footer[0..4].copy_from_slice(b"AVBf");
@@ -175,12 +171,10 @@ fn synthetic_footer(original: u64, vbmeta_offset: u64, vbmeta_size: u64) -> [u8;
     footer
 }
 
-#[cfg(test)]
 fn put_u64(buf: &mut [u8], at: usize, value: u64) {
     buf[at..at + 8].copy_from_slice(&value.to_be_bytes());
 }
 
-#[cfg(test)]
 fn put_u64_arr(buf: &mut [u8; FOOTER_LEN], at: usize, value: u64) {
     buf[at..at + 8].copy_from_slice(&value.to_be_bytes());
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-build-plan"
+description = "Enables the build_plan command without any pre-configured scope."
+commands.allow = ["build_plan"]
+
+[[permission]]
+identifier = "deny-build-plan"
+description = "Denies the build_plan command without any pre-configured scope."
+commands.deny = ["build_plan"]
