@@ -12,7 +12,6 @@ mod gates;
 mod image;
 mod pc;
 mod plan;
-mod policy;
 
 pub use cache::{offer, store, PatchCacheMeta};
 pub use extract::{extract_apk_components, DeviceAbi, ExtractedComponent};
@@ -25,9 +24,8 @@ pub use image::{ExtractedBootImage, SyntheticInitBoot};
 pub use pc::{validate_patched_init_boot, PatchedCheck};
 pub use plan::{
     components_from_extract, official_base_apk, plan_app_patch, AppPatchPlan, AppPatchRequest,
-    HostComponent, FINALLY_STEPS,
+    HostComponent,
 };
-pub use policy::MagiskbootPolicy;
 
 use thiserror::Error;
 

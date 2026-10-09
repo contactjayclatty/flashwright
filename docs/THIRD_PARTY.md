@@ -8,7 +8,7 @@ The safety gates use PixelFlasher's device table, Magisk list, kernel list, boot
 
 M1 does not copy PixelFlasher source beyond the behaviour listed in `docs/disclaimer.md`.
 
-The Magisk app patch follows the same PixelFlasher commit. Each reused item is logged in `docs/disclaimer.md`: `pf_modules.py` `patch_magisk_script` (2698–2939), the app-method choice in `patch_boot_img` (4783–4906), `magisk_not_found` (3687–3715), `runtime.py` `extract_magiskboot` (8702–8732), `runtime.py` `sha1` (3198–3211), and the post-patch check in `pf_modules.py` (5020–5119). `extract_sha1`, `compare_sha1`, and `drive_magisk` are not ported. Magisk itself is GPL-3.0 and is not shipped. magiskboot is not bundled.
+The Magisk app patch follows the same PixelFlasher commit. Each reused item is logged in `docs/disclaimer.md`: `pf_modules.py` `patch_magisk_script` (2698–2939), the app-method choice in `patch_boot_img` (4783–4906), `magisk_not_found` (3687–3715), `runtime.py` `extract_magiskboot` (8702–8732), `runtime.py` `sha1` (3198–3211), and the post-patch check in `pf_modules.py` (5020–5119). `extract_sha1`, `compare_sha1`, and `drive_magisk` are not ported. Magisk itself is GPL-3.0 and is not shipped. Flashwright does not run magiskboot. The patched init_boot is checked by the read-only parser in `flashwright-bootimg`.
 
 M1 does not use payload-dumper-rust, the AOSP update-engine proto, or an avbtool port.
 
@@ -24,6 +24,8 @@ Versions are the ones resolved in `Cargo.lock` on 9 Oct 2026.
 | toml | 0.8.23 | MIT OR Apache-2.0 |
 | sha2 | 0.10.9 | MIT OR Apache-2.0 |
 | sha1 | 0.10.7 | MIT OR Apache-2.0 |
+| flate2 | 1.1.10 | MIT OR Apache-2.0 |
+| lz4_flex | 0.11.6 | MIT |
 | zip | 9.0.0 | MIT |
 | tracing | 0.1.44 | MIT |
 | libc | 0.2.190 | MIT OR Apache-2.0 |
@@ -32,7 +34,7 @@ Versions are the ones resolved in `Cargo.lock` on 9 Oct 2026.
 | serde_jcs | 0.1.0 | MIT OR Apache-2.0 |
 | uuid | 1.11.0 | Apache-2.0 OR MIT |
 
-`zip` is built with `deflate-flate2-zlib-rs` only.
+`zip` is built with `deflate-flate2-zlib-rs` only. `flate2` in the parser uses the Rust backend. `lz4_flex` is built with `safe-decode`.
 
 ## Update wizard
 

@@ -49,35 +49,6 @@ pub(crate) fn host_utility(path: &Path) -> Result<VerifiedExe, ProcError> {
     })
 }
 
-/// A user-supplied tool, checked by absolute path and SHA-256.
-///
-/// Platform-tools names are refused here. Those stay on the allow list.
-/// The file is not searched for on `PATH`.
-pub fn managed_tool(path: &Path, expected_sha256: &str) -> Result<VerifiedExe, ProcError> {
-    reject_path(path)?;
-    let name = file_name(path);
-    if is_platform_tool(&name) {
-        return Err(ProcError::Unverified {
-            detail: format!("{name} is resolved through the platform-tools allow list"),
-        });
-    }
-    if expected_sha256.len() != 64 || !expected_sha256.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return Err(ProcError::Unverified {
-            detail: "expected SHA-256 must be 64 hex digits".into(),
-        });
-    }
-    let sha256 = hash_path(path)?;
-    if !sha256.eq_ignore_ascii_case(expected_sha256) {
-        return Err(ProcError::Unverified {
-            detail: "file hash does not match".into(),
-        });
-    }
-    Ok(VerifiedExe {
-        path: path.to_path_buf(),
-        sha256,
-    })
-}
-
 /// Managed adb or fastboot whose digest matches the allow-list entry.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn platform_tool(path: &Path, expected_sha256: &str) -> Result<VerifiedExe, ProcError> {

@@ -973,6 +973,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
+name = "flashwright-bootimg"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "lz4_flex",
+ "serde",
+ "serde_jcs",
+ "sha2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "flashwright-core"
 version = "0.1.0"
 dependencies = [
@@ -1019,6 +1031,7 @@ dependencies = [
 name = "flashwright-magisk"
 version = "0.1.0"
 dependencies = [
+ "flashwright-bootimg",
  "flashwright-core",
  "flashwright-plan",
  "serde",
@@ -1027,7 +1040,6 @@ dependencies = [
  "sha2",
  "thiserror 2.0.21",
  "tokio",
- "toml 0.8.23",
  "zip",
 ]
 
@@ -2101,6 +2113,15 @@ name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+
+[[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+dependencies = [
+ "twox-hash",
+]
 
 [[package]]
 name = "markup5ever"
@@ -4303,6 +4324,12 @@ dependencies = [
  "termcolor",
  "toml 1.1.8+spec-1.1.0",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "typed-path"

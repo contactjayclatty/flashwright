@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Phone patch: after you confirm "Patch on your phone?", the Magisk app you already installed patches init_boot. Flashwright then checks that image on the PC with magiskboot, which you supply. Pixel 9 Pro XL (komodo) uses init_boot. A hidden or renamed Magisk app is refused. See `docs/m3.md`.
+- Phone patch: after you confirm "Patch on your phone?", the Magisk app you already installed patches init_boot. Flashwright then reads that image and checks Magisk's init and the stock SHA-1. Pixel 9 Pro XL (komodo) uses init_boot. A hidden or renamed Magisk app is refused. See `docs/m3.md`.
 - A plan request names the phone and the steps. Flashwright reads every safety fact itself, stores the evidence in the plan hash, and draws a random nonce. A plan expires after fifteen minutes. A used or dry-run plan cannot be replayed.
 - Stock backup streams each image to disk, reads it a second time, and checks both against `sha256sum` on the phone. Reads honour the catalogue size cap and the pull timeout.
 - Gate G26 blocks a vbmeta flash. Gates G01 through G28 are covered by tests. Each write, including reboot, set-active, and cleanup, is checked again, and the phone is read again before a token is minted.

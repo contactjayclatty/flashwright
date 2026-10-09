@@ -8,8 +8,9 @@
 //! double-quoted token. The only unquoted shell syntax is `| sha256sum`.
 
 use super::{
-    AdbHostRead, AdbHostWrite, AdbShellRead, AdbShellWrite, ByNameRoot, CmdError, DeviceSerial,
-    ExecOutSuRead, FastbootRead, FastbootWrite, ReadCmd, SuRead, SuWrite, WorkFile, WriteCmd,
+    AdbHostRead, AdbHostWrite, AdbShellRead, AdbShellWrite, ByNameRoot, CleanupCmd, CmdError,
+    DeviceSerial, ExecOutSuRead, FastbootRead, FastbootWrite, ReadCmd, SuRead, SuWrite, WorkFile,
+    WriteCmd,
 };
 use crate::device::{Partition, RebootTarget, Slot};
 
@@ -88,6 +89,17 @@ pub fn read_argv(cmd: &ReadCmd) -> Result<Rendered, CmdError> {
     Ok(Rendered { tool, args })
 }
 
+pub fn cleanup_argv(cmd: &CleanupCmd) -> Result<Rendered, CmdError> {
+    let CleanupCmd::RemoveWorkDir { serial } = cmd;
+    Ok(Rendered {
+        tool: Tool::Adb,
+        args: shell_remote(
+            serial,
+            &join_quoted(&["rm", "-rf", "/data/local/tmp/flashwright"]),
+        ),
+    })
+}
+
 pub fn write_argv(cmd: &WriteCmd) -> Result<Rendered, CmdError> {
     let args = match cmd {
         WriteCmd::AdbHost(AdbHostWrite::Push { serial, src, dst }) => {
@@ -102,10 +114,6 @@ pub fn write_argv(cmd: &WriteCmd) -> Result<Rendered, CmdError> {
         WriteCmd::AdbShell(AdbShellWrite::MakeWorkDir { serial }) => shell_remote(
             serial,
             &join_quoted(&["mkdir", "-p", "/data/local/tmp/flashwright/out"]),
-        ),
-        WriteCmd::AdbShell(AdbShellWrite::RemoveWorkDir { serial }) => shell_remote(
-            serial,
-            &join_quoted(&["rm", "-rf", "/data/local/tmp/flashwright"]),
         ),
         WriteCmd::AdbShell(AdbShellWrite::RunPatchScript { serial }) => shell_remote(
             serial,
@@ -553,9 +561,9 @@ mod golden {
             ),
             (
                 "rm",
-                write_argv(&WriteCmd::AdbShell(AdbShellWrite::RemoveWorkDir {
+                cleanup_argv(&CleanupCmd::RemoveWorkDir {
                     serial: serial.clone(),
-                }))
+                })
                 .unwrap(),
             ),
             (

@@ -167,6 +167,15 @@ pub fn sideload_finalising() -> Duration {
     Duration::from_secs(load().sideload.finalising_s)
 }
 
+/// Budget for the fixed work-directory cleanup. It is not a write budget.
+pub fn cleanup_budget() -> StepBudget {
+    let file = load();
+    StepBudget {
+        timeout: Duration::from_secs(file.read.shell_s),
+        watchdog: None,
+    }
+}
+
 pub fn pull_budget(size_bytes: u64, multiplier: f64) -> Result<StepBudget, TimeoutError> {
     let scale = check_multiplier(multiplier)?;
     let row = &load().pull;
