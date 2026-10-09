@@ -1210,7 +1210,7 @@ impl<T: DeviceTransport> Engine<T> {
         if lines.iter().all(|line| !line.starts_with("WOULD BLOCK")) {
             for step in &steps {
                 let collected = safety::CollectedFacts::from_ref(&facts);
-                let blocks = safety::evaluate_step(step, Some(&collected));
+                let blocks = safety::evaluate_step(step, Some(collected));
                 if !blocks.is_empty() {
                     lines = blocks
                         .iter()
@@ -1234,7 +1234,7 @@ impl<T: DeviceTransport> Engine<T> {
         }
         for step in &steps {
             let collected = safety::CollectedFacts::from_ref(&facts);
-            if let Some(gate) = safety::evaluate_step(step, Some(&collected))
+            if let Some(gate) = safety::evaluate_step(step, Some(collected))
                 .into_iter()
                 .next()
             {

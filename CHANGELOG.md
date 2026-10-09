@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `safety::evaluate_step` is the public gate check. It takes only facts Flashwright collected and hashed for that phone's serial. A changed phone or backup discards the plan. Firmware facts come from the package and the boot image. A stock backup gets a new id and is never replaced. An update or sideload uses the boot image size and the inactive slot. `getvar` reads stderr, matches yes and no exactly, and runs only in fastboot. A failed device read stops the plan. The cleanup length and an optional linked dry run are part of the plan hash. Windows USB library hashes stay locked until the tool starts.
 - The update wizard confirms a plan once from the review step. The window shell grants one capability, and sample phones stay out of the release bundle. Each write is checked with the safety gates before it runs.
 - A patch confirm returns to the firmware step. Review buttons follow the plan dry-run flag. Cancelling a finished job does nothing. Recovery commands name a real slot, a restore uses the chosen backup file, and the package pickers do not block the window.
 - Open a Pixel factory zip or a full OTA zip, extract `init_boot` or `boot`, and check the package SHA-256 and the payload partition hash. Nothing is written to a phone. See `docs/m2.md`.

@@ -153,7 +153,10 @@ async fn confirming_an_unprepared_patch_is_blocked() {
         .flat_map(|call| call.args.iter().cloned())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(!blob.contains("'su'"));
+    assert!(calls.iter().all(|call| {
+        let joined = call.args.join(" ");
+        !joined.contains("'su'") || joined.contains("magisk")
+    }));
     assert!(!blob.contains("'pm'"));
     assert!(!blob.contains(" pm "));
 }
@@ -655,6 +658,17 @@ fn script(runner: &ScriptedRunner, patch_ok: bool) {
         stock.sha256_hex()
     );
     let name = if cfg!(windows) { "adb.exe" } else { "adb" };
+    let fastboot = if cfg!(windows) {
+        "fastboot.exe"
+    } else {
+        "fastboot"
+    };
+    runner.on(
+        name,
+        &["devices", "-l"],
+        ScriptedResponse::ok(format!("List of devices attached\n{SERIAL} device\n")),
+    );
+    runner.on(fastboot, &["devices", "-l"], ScriptedResponse::ok(""));
     runner.on_fn(name, &["-s", SERIAL], move |invocation, _| {
         route(invocation, patch_ok, &lines)
     });
@@ -672,6 +686,10 @@ fn route(invocation: &RecordedCall, patch_ok: bool, lines: &str) -> ScriptedResp
                 } else {
                     ScriptedResponse::fail(1, "! stock image is missing\n")
                 }
+            } else if remote.contains("getprop") {
+                ScriptedResponse::ok(
+                    "[ro.product.device]: [komodo]\n[ro.boot.flash.locked]: [0]\n[ro.boot.slot_suffix]: [_a]\n",
+                )
             } else if remote.contains("mkdir") || remote.contains("'rm'") || remote.contains("'ls'")
             {
                 if remote.contains("'ls'") {

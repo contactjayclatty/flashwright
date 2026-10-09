@@ -137,6 +137,8 @@ pub fn plan_app_patch(request: &AppPatchRequest<'_>) -> Result<AppPatchPlan, Mag
                 images,
                 ..FirmwareClaim::default()
             },
+            finally_steps: 0,
+            after_dry_run: None,
         },
         title: PREPARE_PATCH_TITLE,
         button: PREPARE_PATCH_BUTTON,
