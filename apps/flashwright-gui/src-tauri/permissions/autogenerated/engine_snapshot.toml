@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-engine-snapshot"
+description = "Enables the engine_snapshot command without any pre-configured scope."
+commands.allow = ["engine_snapshot"]
+
+[[permission]]
+identifier = "deny-engine-snapshot"
+description = "Denies the engine_snapshot command without any pre-configured scope."
+commands.deny = ["engine_snapshot"]

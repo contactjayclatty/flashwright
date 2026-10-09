@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-continue-from-choose"
+description = "Enables the continue_from_choose command without any pre-configured scope."
+commands.allow = ["continue_from_choose"]
+
+[[permission]]
+identifier = "deny-continue-from-choose"
+description = "Denies the continue_from_choose command without any pre-configured scope."
+commands.deny = ["continue_from_choose"]

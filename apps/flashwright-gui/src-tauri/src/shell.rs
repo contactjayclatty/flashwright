@@ -9,7 +9,7 @@
 use std::sync::Mutex;
 
 use tauri::ipc::Channel;
-use tauri::{Manager, State, WebviewWindowBuilder};
+use tauri::{State, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
@@ -76,13 +76,20 @@ fn tools_status(state: State<EngineState>) -> Result<Snapshot, String> {
     snap(&state, |engine| engine.tools_status())
 }
 
-#[tauri::command]
-fn tools_pick_folder(app: tauri::AppHandle, state: State<EngineState>) -> Result<Snapshot, String> {
-    let display = app.dialog().file().blocking_pick_folder().map(|path| {
+fn display_name(path: tauri_plugin_dialog::FilePath) -> Option<String> {
+    path.into_path().ok().and_then(|path| {
         path.file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "platform-tools".to_string())
-    });
+    })
+}
+
+#[tauri::command]
+fn tools_pick_folder(app: tauri::AppHandle, state: State<EngineState>) -> Result<Snapshot, String> {
+    let display = app
+        .dialog()
+        .file()
+        .blocking_pick_folder()
+        .and_then(display_name);
     snap(&state, |engine| engine.note_tools_folder(display))
 }
 
@@ -93,10 +100,7 @@ fn tools_import_zip(app: tauri::AppHandle, state: State<EngineState>) -> Result<
         .file()
         .add_filter("Zip", &["zip"])
         .blocking_pick_file()
-        .and_then(|path| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        });
+        .and_then(display_name);
     snap(&state, |engine| engine.note_tools_zip(display))
 }
 
@@ -290,7 +294,7 @@ pub fn run() {
                 .cloned()
                 .ok_or_else(|| "The main window is missing from the configuration.".to_string())?;
             let _ = WebviewWindowBuilder::from_config(app.handle(), &window)?
-                .on_navigation(|url| navigation_allowed(url))
+                .on_navigation(navigation_allowed)
                 .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Deny)
                 .build()?;
             let _ = PHASE1_COMMANDS;
