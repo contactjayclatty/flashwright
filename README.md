@@ -67,7 +67,7 @@ The Windows 11 wizard walks through connect, choose, firmware, review, and flash
 
 Android, Google, and Pixel are trademarks of Google LLC. Magisk is a project by topjohnwu. They are named descriptively. Flashwright is not affiliated with or endorsed by them.
 
-Platform-tools are located and version-checked before a scan. A phone session runs that verified adb and fastboot. While locating them, Flashwright records the program listening on 127.0.0.1:5037 and refuses a write when that program is not the verified adb. Writes stay off until an allow-list entry has per-file hashes and has been device-tested. A confirmed plan is single-use: Flashwright re-checks the phone and the input files, then discards the plan if either has changed.
+Platform-tools are located and version-checked before a scan. A phone session runs that verified adb and fastboot. Every run, including a scan, compares the tool file with the allow-list hash. A copy, a hard link, or a file that was only hashed is refused, and the tools directory is not the working directory. While locating them, Flashwright records the program listening on 127.0.0.1:5037 and refuses a write when that program is not the verified adb. Writes stay off until an allow-list entry has per-file hashes and has been device-tested. A confirmed plan is single-use: Flashwright re-checks the phone, the full device record, and the input files, holds those files open until the flash finishes, and discards the plan if the phone, the backup, or a file has changed.
 
 ## Features
 

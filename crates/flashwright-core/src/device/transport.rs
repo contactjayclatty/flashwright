@@ -869,6 +869,10 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         limits: RunLimits,
     ) -> Result<RunResult, DeviceError> {
         let exe = self.exe_for(program)?;
+        if exe.trust() != crate::exe::Trust::Scripted {
+            crate::exe::recheck_allow_list(&exe)
+                .map_err(|err| DeviceError::Message(err.to_string()))?;
+        }
         self.runner
             .run(&exe, &command, limits)
             .await

@@ -29,6 +29,16 @@ pub struct VerifiedExe {
     path: PathBuf,
     sha256: String,
     trust: Trust,
+    file_id: Option<FileId>,
+}
+
+/// Identity of the opened file. A later run must see the same inode, one link,
+/// and the allow-list digest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileId {
+    dev: u64,
+    ino: u64,
+    nlink: u64,
 }
 
 impl VerifiedExe {
@@ -44,10 +54,9 @@ impl VerifiedExe {
         self.trust
     }
 
-    /// Real spawn accepts only a measured or allow-listed adb or fastboot.
+    /// Real spawn accepts only an allow-listed adb or fastboot.
     pub(crate) fn admits_system_spawn(&self) -> bool {
-        matches!(self.trust, Trust::Measured | Trust::AllowListed)
-            && is_platform_tool(&file_name(&self.path))
+        self.trust == Trust::AllowListed && is_platform_tool(&file_name(&self.path))
     }
 }
 
@@ -59,8 +68,9 @@ pub struct ListenerImage {
 
 /// Hash a regular adb or fastboot file without consulting the allow list.
 ///
-/// Symlinks fail `O_NOFOLLOW`. Any other name, including a helper that points
-/// at a shell or an interpreter, is refused.
+/// Symlinks fail `O_NOFOLLOW`. Hard links and any other name, including a
+/// helper that points at a shell or an interpreter, are refused. A measured
+/// file still cannot run until [`platform_tool`] matches the allow list.
 pub(crate) fn measure_platform_tool(path: &Path) -> Result<VerifiedExe, ProcError> {
     reject_path(path)?;
     let name = file_name(path);
@@ -70,12 +80,55 @@ pub(crate) fn measure_platform_tool(path: &Path) -> Result<VerifiedExe, ProcErro
         });
     }
     let mut file = open_share_read(path)?;
+    let file_id = file_identity(&file)?;
+    if file_id.nlink != 1 {
+        return Err(ProcError::Unverified {
+            detail: format!("{name} is a hard link"),
+        });
+    }
     let sha256 = hash_file(&mut file)?;
     Ok(VerifiedExe {
         path: path.to_path_buf(),
         sha256,
         trust: Trust::Measured,
+        file_id: Some(file_id),
     })
+}
+
+/// Re-open the file and compare it with the allow-list digest.
+///
+/// Scans and writes both use this. A measured file, a hard link, a replaced
+/// copy, or a hash that no longer matches the allow list is refused.
+pub(crate) fn recheck_allow_list(exe: &VerifiedExe) -> Result<(), ProcError> {
+    if !exe.admits_system_spawn() {
+        return Err(ProcError::Unverified {
+            detail: "only an allow-listed adb or fastboot may run".into(),
+        });
+    }
+    let Some(expected) = exe.file_id else {
+        return Err(ProcError::Unverified {
+            detail: "only an allow-listed adb or fastboot may run".into(),
+        });
+    };
+    let mut file = open_share_read(exe.path())?;
+    let file_id = file_identity(&file)?;
+    if file_id.nlink != 1 {
+        return Err(ProcError::Unverified {
+            detail: "the platform-tools file is a hard link".into(),
+        });
+    }
+    if file_id != expected {
+        return Err(ProcError::Unverified {
+            detail: "a copy replaced the allow-listed platform-tools file".into(),
+        });
+    }
+    let sha256 = hash_file(&mut file)?;
+    if !sha256.eq_ignore_ascii_case(exe.sha256()) {
+        return Err(ProcError::Unverified {
+            detail: "platform-tools file hash does not match the allow list".into(),
+        });
+    }
+    Ok(())
 }
 
 /// Managed adb or fastboot whose digest matches the allow-list entry.
@@ -90,6 +143,7 @@ pub(crate) fn platform_tool(path: &Path, expected_sha256: &str) -> Result<Verifi
         path: measured.path,
         sha256: measured.sha256,
         trust: Trust::AllowListed,
+        file_id: measured.file_id,
     })
 }
 
@@ -106,6 +160,7 @@ pub(crate) fn scripted_tool(path: &Path) -> Result<VerifiedExe, ProcError> {
         path: path.to_path_buf(),
         sha256: String::new(),
         trust: Trust::Scripted,
+        file_id: None,
     })
 }
 
@@ -251,7 +306,10 @@ fn open_share_read(path: &Path) -> Result<File, ProcError> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
+        // FILE_SHARE_READ, and open the reparse point itself so a symlink or
+        // junction is visible instead of its target.
         options.share_mode(1);
+        options.custom_flags(0x0020_0000);
     }
     let file = options
         .open(path)
@@ -264,5 +322,61 @@ fn open_share_read(path: &Path) -> Result<File, ProcError> {
             return Err(ProcError::Io(std::io::Error::last_os_error()));
         }
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const REPARSE: u32 = 0x400;
+        let meta = file.metadata()?;
+        if meta.file_attributes() & REPARSE != 0 {
+            return Err(ProcError::Unverified {
+                detail: "reparse points are not used".into(),
+            });
+        }
+    }
     Ok(file)
+}
+
+fn file_identity(file: &File) -> Result<FileId, ProcError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = file.metadata()?;
+        Ok(FileId {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            nlink: meta.nlink(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        };
+        // SAFETY: the handle is the open file, and the struct is written only
+        // on success before it is read.
+        let info = unsafe {
+            let mut info = BY_HANDLE_FILE_INFORMATION::default();
+            GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info).map_err(|_| {
+                ProcError::Unverified {
+                    detail: "the platform-tools file could not be identified".into(),
+                }
+            })?;
+            info
+        };
+        let ino = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+        Ok(FileId {
+            dev: u64::from(info.dwVolumeSerialNumber),
+            ino,
+            nlink: u64::from(info.nNumberOfLinks),
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        Err(ProcError::Unverified {
+            detail: "the platform-tools file could not be identified".into(),
+        })
+    }
 }

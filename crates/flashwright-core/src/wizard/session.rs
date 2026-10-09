@@ -221,6 +221,7 @@ struct HeldPlan {
     timeouts: Vec<TimeoutSnap>,
     acks: Vec<String>,
     files: Vec<InputFile>,
+    device: Option<crate::device::DeviceInfo>,
     life: PlanLife,
 }
 
@@ -340,6 +341,7 @@ impl<R: CommandRunner> WizardSession<R> {
             return Err(rejected("That plan was already used."));
         }
         let files = input_files(&request);
+        let device = self.probe_device_info(&request.serial).await;
         let preview = PlanPreview {
             plan_code: plan_code(&hash),
             plan_hash: hash.clone(),
@@ -361,6 +363,7 @@ impl<R: CommandRunner> WizardSession<R> {
             timeouts,
             acks,
             files,
+            device,
             life: PlanLife::Issued,
         });
         self.safety = Some(facts);
@@ -521,10 +524,21 @@ impl<R: CommandRunner> WizardSession<R> {
             return Err(rejected("A dry-run plan does not write."));
         }
         let files = self.held.as_ref().expect("plan").files.clone();
-        if !files_match(&files) {
+        let holds = match hold_inputs(&files) {
+            Ok(holds) => holds,
+            Err(()) => {
+                let hash = self.held.as_ref().expect("plan").hash.clone();
+                self.discard(&hash);
+                self.phase = Phase::Connect;
+                return Err(rejected("An input file changed. Build the plan again."));
+            }
+        };
+        if self.device_changed().await {
+            drop(holds);
             let hash = self.held.as_ref().expect("plan").hash.clone();
             self.discard(&hash);
-            return Err(rejected("An input file changed. Build the plan again."));
+            self.phase = Phase::Connect;
+            return Err(rejected("The phone changed. Build the plan again."));
         }
         self.reprobe().await?;
         if self.snapshot_differs() {
@@ -539,6 +553,7 @@ impl<R: CommandRunner> WizardSession<R> {
         let decisions =
             safety::evaluate_acked(&steps, self.safety.as_ref(), self.backup.as_ref(), &acks);
         if let Some(reason) = block_reason(&decisions) {
+            drop(holds);
             return Err(rejected(format!("Blocked: {reason}")));
         }
         if finally_steps > steps.len() {
@@ -594,6 +609,7 @@ impl<R: CommandRunner> WizardSession<R> {
                 }
             }
         }
+        drop(holds);
         drop(token);
         if let Some(err) = failed {
             self.phase = Phase::Recovery;
@@ -764,6 +780,26 @@ impl<R: CommandRunner> WizardSession<R> {
                 let hash = held.hash.clone();
                 self.discard(&hash);
             }
+        }
+    }
+
+    async fn probe_device_info(&self, serial: &str) -> Option<crate::device::DeviceInfo> {
+        let aliases = crate::device::AliasTable::embedded().ok()?;
+        let devices = crate::device::DeviceTable::embedded().ok()?;
+        self.transport
+            .device_info(serial, &aliases, &devices)
+            .await
+            .ok()
+    }
+
+    async fn device_changed(&self) -> bool {
+        let Some(before) = self.held.as_ref().and_then(|held| held.device.clone()) else {
+            return false;
+        };
+        let serial = self.held.as_ref().expect("plan").serial.clone();
+        match self.probe_device_info(&serial).await {
+            Some(after) => after != before,
+            None => false,
         }
     }
 }
@@ -1096,7 +1132,7 @@ fn input_files(request: &PlanRequest) -> Vec<InputFile> {
         };
         push_input(&mut files, path);
     }
-    if !request.firmware.filename.is_empty() {
+    if !request.firmware.filename.is_empty() && Path::new(&request.firmware.filename).is_file() {
         push_input(&mut files, &request.firmware.filename);
     }
     files
@@ -1112,10 +1148,25 @@ fn push_input(files: &mut Vec<InputFile>, path: &str) {
     });
 }
 
-fn files_match(expected: &[InputFile]) -> bool {
-    expected
+fn hold_inputs(expected: &[InputFile]) -> Result<crate::exe::SharedReadLocks, ()> {
+    if expected.iter().any(|file| file.sha256.is_none()) {
+        return Err(());
+    }
+    let paths: Vec<std::path::PathBuf> = expected
         .iter()
-        .all(|file| hash_file(Path::new(&file.path)) == file.sha256)
+        .map(|file| std::path::PathBuf::from(&file.path))
+        .collect();
+    let mut locks = crate::exe::SharedReadLocks::hold(&paths).map_err(|_| ())?;
+    let hashes = locks.hashes().map_err(|_| ())?;
+    if hashes.len() != expected.len()
+        || hashes
+            .iter()
+            .zip(expected)
+            .any(|(hash, file)| file.sha256.as_deref() != Some(hash.as_str()))
+    {
+        return Err(());
+    }
+    Ok(locks)
 }
 
 fn hash_file(path: &Path) -> Option<String> {
@@ -1131,7 +1182,12 @@ fn hash_file(path: &Path) -> Option<String> {
         }
         hasher.update(&buf[..read]);
     }
-    Some(safety::sha256_hex(&hasher.finalize()))
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    Some(hex)
 }
 
 fn empty_facts() -> SafetyFacts {
@@ -1908,19 +1964,21 @@ mod tests {
         assert!(runner.calls().is_empty());
         assert_eq!(open_run_count(), before);
         assert_eq!(session.phase(), Phase::Done);
+        let (dir, image) = temp_image();
         let mut confirm_session = open(Arc::clone(&runner), 1_000);
         let preview = confirm_session
-            .build_plan(flash_draft(false, "/var/flashwright/missing.img"))
+            .build_plan(flash_draft(false, image.to_string_lossy().as_ref()))
             .await
             .unwrap();
         let err = confirm_session
             .confirm_and_run(&preview.plan_hash)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("Blocked:"));
+        assert!(err.to_string().contains("Blocked:"), "{err}");
         assert_eq!(confirm_session.phase(), Phase::Review);
         assert!(runner.calls().is_empty());
         assert_eq!(open_run_count(), before);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -2113,9 +2171,10 @@ mod tests {
         let refused = session.acknowledge(&acked.plan_hash, "G20").unwrap_err();
         assert!(refused.to_string().contains("cannot be acknowledged"));
 
+        let (dir, image) = temp_image();
         let mut blocked = open(runner, 1_000);
         let preview = blocked
-            .build_plan(flash_draft(false, "/var/flashwright/missing.img"))
+            .build_plan(flash_draft(false, image.to_string_lossy().as_ref()))
             .await
             .unwrap();
         let before = open_run_count();
@@ -2123,9 +2182,10 @@ mod tests {
             .confirm_and_run_finally(&preview.plan_hash, 0)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("Blocked:"));
+        assert!(err.to_string().contains("Blocked:"), "{err}");
         assert_eq!(blocked.phase(), Phase::Review);
         assert_eq!(open_run_count(), before);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -2284,5 +2344,69 @@ mod tests {
         let lines = session.dry_run(&preview.plan_hash).unwrap();
         assert!(lines.iter().any(|line| line.contains("G05")), "{lines:?}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_missing_input_file_fails_the_rehash() {
+        let _gate = gate().await;
+        let runner = Arc::new(ScriptedRunner::new());
+        script_phone(&runner, "synth-komodo-1", komodo_props());
+        let mut session = session(Arc::clone(&runner), 1_000);
+        install_tools(session.transport());
+        let preview = session
+            .build_plan(flash_draft(false, "/var/flashwright/missing.img"))
+            .await
+            .unwrap();
+        let before = open_run_count();
+        let err = session
+            .confirm_and_run(&preview.plan_hash)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("input file"), "{err}");
+        assert_eq!(session.phase(), Phase::Connect);
+        assert_eq!(open_run_count(), before);
+        assert!(runner
+            .calls()
+            .iter()
+            .all(|call| !call.args.iter().any(|arg| arg == "flash")));
+    }
+
+    #[tokio::test]
+    async fn confirm_compares_the_whole_device_info() {
+        let _gate = gate().await;
+        let runner = Arc::new(ScriptedRunner::new());
+        let props = Arc::new(std::sync::Mutex::new(props_with_model("Pixel 9 Pro XL")));
+        let scripted = Arc::clone(&props);
+        runner.on(
+            adb_bin(),
+            &["devices", "-l"],
+            ScriptedResponse::ok("List of devices attached\npixel1 device\n"),
+        );
+        runner.on(fastboot_bin(), &["devices", "-l"], ScriptedResponse::ok(""));
+        runner.on_fn(adb_bin(), &["-s", "pixel1", "shell"], move |call, _hit| {
+            let remote = call.args.last().map(String::as_str).unwrap_or("");
+            if remote.contains("getprop") {
+                ScriptedResponse::ok(scripted.lock().expect("props").clone())
+            } else {
+                ScriptedResponse::ok("")
+            }
+        });
+        let mut session = session(Arc::clone(&runner), 1_000);
+        install_tools(session.transport());
+        let preview = session.build_plan(draft(false, 5_000)).await.unwrap();
+        *props.lock().expect("props") = props_with_model("Pixel 9");
+        let before = open_run_count();
+        let err = session
+            .confirm_and_run(&preview.plan_hash)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("phone changed"), "{err}");
+        assert_eq!(session.phase(), Phase::Connect);
+        assert_eq!(reboot_calls(&runner), 0);
+        assert_eq!(open_run_count(), before);
+    }
+
+    fn props_with_model(model: &str) -> String {
+        format!("{}\n[ro.product.model]: [{model}]", komodo_props())
     }
 }
