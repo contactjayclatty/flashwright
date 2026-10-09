@@ -12,12 +12,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::exe::{adb_server_matches, SharedReadLocks, VerifiedExe};
-use crate::proc::{CommandRunner, Invocation, RunResult};
+use crate::cmd::{AdbHostRead, CatalogueCommand, DeviceSerial, FastbootRead, FastbootVar, ReadCmd};
+use crate::exe::{adb_server_matches, resolve_tool, SharedReadLocks, VerifiedExe};
+use crate::proc::{CommandRunner, RunLimits, RunResult};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::device::argv::{self, devices_long};
 use crate::device::catalog::{AliasTable, DeviceTable};
 use crate::device::info::{assemble_from_adb, assemble_from_fastboot, AdbTexts};
 use crate::device::parse::{
@@ -43,6 +43,7 @@ pub struct PlatformToolsTransport<R: CommandRunner> {
     config: TransportConfig,
     active: Arc<Mutex<Option<ArmedRun>>>,
     verified: Arc<Mutex<Option<VerifiedTools>>>,
+    writes_allowed: Arc<Mutex<bool>>,
 }
 
 struct VerifiedTools {
@@ -60,6 +61,7 @@ impl<R: CommandRunner> Clone for PlatformToolsTransport<R> {
             config: self.config.clone(),
             active: Arc::clone(&self.active),
             verified: Arc::clone(&self.verified),
+            writes_allowed: Arc::clone(&self.writes_allowed),
         }
     }
 }
@@ -78,11 +80,20 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
             config,
             active: Arc::new(Mutex::new(None)),
             verified: Arc::new(Mutex::new(None)),
+            writes_allowed: Arc::new(Mutex::new(false)),
         }
     }
 
+    /// Record whether the platform-tools verdict allows a write.
+    pub(crate) fn note_tools_verdict(&self, writes_allowed: bool) {
+        *self.writes_allowed.lock().expect("tools verdict") = writes_allowed;
+    }
+
+    pub(crate) fn writes_allowed(&self) -> bool {
+        *self.writes_allowed.lock().expect("tools verdict")
+    }
+
     /// Install hashes measured at import. Writes re-check them while the files stay open.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn install_verified(
         &self,
         adb: VerifiedExe,
@@ -102,6 +113,42 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         *self.active.lock().expect("armed run") = None;
     }
 
+    /// Drop every pending write except the last `keep`, so a cleanup tail can still run.
+    pub(crate) fn keep_last_pending(&self, keep: usize) {
+        let mut guard = self.active.lock().expect("armed run");
+        let Some(active) = guard.as_mut() else {
+            return;
+        };
+        let len = active.pending.len();
+        if len > keep {
+            active.pending.drain(0..len - keep);
+        }
+    }
+
+    /// `(installed, digest still matches, adb server is the verified binary)`.
+    pub(crate) fn tool_gate(&self) -> (bool, bool, bool) {
+        let guard = self.verified.lock().expect("verified tools");
+        let Some(tools) = guard.as_ref() else {
+            return (false, false, false);
+        };
+        let paths = vec![
+            tools.adb.path().to_path_buf(),
+            tools.fastboot.path().to_path_buf(),
+        ];
+        let unchanged = match crate::exe::SharedReadLocks::hold(&paths) {
+            Ok(mut locks) => match locks.hashes() {
+                Ok(hashes) => {
+                    hashes.first().map(String::as_str) == Some(tools.adb.sha256())
+                        && hashes.get(1).map(String::as_str) == Some(tools.fastboot.sha256())
+                }
+                Err(_) => false,
+            },
+            Err(_) => false,
+        };
+        let server = adb_server_matches(&tools.adb, tools.listener.as_ref()).is_ok();
+        (true, unchanged, server)
+    }
+
     pub(crate) fn arm(&self, plan: &crate::token::ConfirmedPlan) {
         *self.active.lock().expect("armed run") = Some(ArmedRun {
             plan_hash: plan.plan_hash().to_string(),
@@ -115,11 +162,10 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         let rendered =
             crate::cmd::read_argv(&cmd).map_err(|err| DeviceError::Message(err.to_string()))?;
         let budget = crate::timeouts::read_budget(&cmd);
-        let program = match rendered.tool {
-            crate::cmd::Tool::Adb => &self.adb,
-            crate::cmd::Tool::Fastboot => &self.fastboot,
-        };
-        self.run(program, rendered.args, budget.timeout).await
+        let program = self.program_for(rendered.tool);
+        let command = CatalogueCommand::from_rendered(rendered);
+        self.run_tool(program, command, RunLimits::from_budget(&budget))
+            .await
     }
 
     pub async fn stream_read(
@@ -141,13 +187,11 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         let size = write_size(&cmd);
         let budget = crate::timeouts::write_budget(&cmd, size, 1.0)
             .map_err(|_| DeviceError::Message("timeout multiplier is out of range".into()))?;
-        let program = match rendered.tool {
-            crate::cmd::Tool::Adb => &self.adb,
-            crate::cmd::Tool::Fastboot => &self.fastboot,
-        };
-        let invocation = Invocation::tied(program, rendered.args, budget.timeout)
-            .with_watchdog(budget.watchdog.unwrap_or(budget.timeout));
-        let result = self.runner.run(invocation).await.map_err(DeviceError::from);
+        let program = self.program_for(rendered.tool);
+        let command = CatalogueCommand::from_rendered(rendered);
+        let result = self
+            .run_tool(program, command, RunLimits::from_budget(&budget))
+            .await;
         drop(locks);
         result
     }
@@ -156,9 +200,16 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         &self,
         cmd: &crate::cmd::WriteCmd,
     ) -> Result<Option<SharedReadLocks>, DeviceError> {
+        if !self.writes_allowed() {
+            return Err(DeviceError::Message(
+                "G21 blocked: no verified platform-tools are installed".into(),
+            ));
+        }
         let guard = self.verified.lock().expect("verified tools");
         let Some(tools) = guard.as_ref() else {
-            return Ok(None);
+            return Err(DeviceError::Message(
+                "G21 blocked: no verified platform-tools are installed".into(),
+            ));
         };
         let paths = vec![
             tools.adb.path().to_path_buf(),
@@ -216,13 +267,13 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
 
     pub async fn list(&self) -> Result<Vec<ScanEntry>, DeviceError> {
         let adb = self
-            .run(&self.adb, devices_long(), self.config.command_timeout)
+            .run_read(ReadCmd::AdbHost(AdbHostRead::Devices))
             .await?;
         if !adb.success_exit() {
             return Err(command_failed("adb devices -l", &adb));
         }
         let fastboot = self
-            .run(&self.fastboot, devices_long(), self.config.command_timeout)
+            .run_read(ReadCmd::Fastboot(FastbootRead::Devices))
             .await?;
         if !fastboot.success_exit() {
             return Err(command_failed("fastboot devices -l", &fastboot));
@@ -236,10 +287,11 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         Ok(merge_scans(adb_rows, fastboot_rows))
     }
 
-    pub async fn state(&self, serial: &str) -> Result<Mode, DeviceError> {
-        let args = argv::with_serial(serial, &["get-state"]);
+    pub async fn state(&self, serial: &DeviceSerial) -> Result<Mode, DeviceError> {
         let result = self
-            .run(&self.adb, args, self.config.command_timeout)
+            .run_read(ReadCmd::AdbHost(AdbHostRead::GetState {
+                serial: serial.clone(),
+            }))
             .await?;
         if result.success_exit() {
             let token = result.stdout_text();
@@ -248,7 +300,7 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
             }
         }
         let listed = self
-            .run(&self.fastboot, devices_long(), self.config.command_timeout)
+            .run_read(ReadCmd::Fastboot(FastbootRead::Devices))
             .await?;
         if !listed.success_exit() {
             return Err(command_failed("fastboot devices -l", &listed));
@@ -256,10 +308,10 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         let rows =
             parse_fastboot_devices(&format!("{}{}", listed.stdout_text(), listed.stderr_text()));
         rows.into_iter()
-            .find(|row| row.serial == serial)
+            .find(|row| row.serial == serial.as_str())
             .map(|row| row.mode)
             .ok_or_else(|| DeviceError::NotConnected {
-                serial: serial.to_string(),
+                serial: serial.as_str().to_string(),
             })
     }
 
@@ -279,11 +331,12 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
 
     pub async fn getvar_all(
         &self,
-        serial: &str,
+        serial: &DeviceSerial,
     ) -> Result<crate::device::parse::PropMap, DeviceError> {
-        let args = argv::with_serial(serial, &["getvar", "all"]);
         let result = self
-            .run(&self.fastboot, args, self.config.prop_timeout)
+            .run_read(ReadCmd::Fastboot(FastbootRead::GetvarAll {
+                serial: serial.clone(),
+            }))
             .await?;
         if !result.success_exit() {
             return Err(command_failed("fastboot getvar all", &result));
@@ -294,16 +347,23 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         ))
     }
 
-    pub async fn getvar(&self, serial: &str, name: &str) -> Result<Option<String>, DeviceError> {
-        let args = argv::with_serial(serial, &["getvar", name]);
+    pub async fn getvar(
+        &self,
+        serial: &DeviceSerial,
+        var: FastbootVar,
+    ) -> Result<Option<String>, DeviceError> {
+        let name = var.as_str();
         let result = self
-            .run(&self.fastboot, args, self.config.prop_timeout)
+            .run_read(ReadCmd::Fastboot(FastbootRead::Getvar {
+                serial: serial.clone(),
+                var,
+            }))
             .await?;
         if !result.success_exit() {
             return Err(command_failed("fastboot getvar", &result));
         }
         let vars = crate::device::parse::parse_getvar(&result.stdout_text(), &result.stderr_text());
-        Ok(vars.get(name).cloned())
+        Ok(vars.get(&name).cloned())
     }
 
     pub async fn device_info(
@@ -455,7 +515,8 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
                 },
             ))
             .await?;
-        if current.success_exit() && current.stdout_text().contains(slot.as_str()) {
+        let value = getvar_value(&current, "current-slot");
+        if current.success_exit() && value.as_deref() == Some(slot.as_str()) {
             Ok(())
         } else {
             Err(command_failed("fastboot getvar current-slot", &current))
@@ -547,8 +608,9 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
                 },
             ))
             .await?;
-        let current_slot = last_value(&current.stdout_text());
-        let unbootable_value = last_value(&unbootable.stdout_text());
+        let current_slot = getvar_value(&current, "current-slot").unwrap_or_default();
+        let unbootable_name = format!("slot-unbootable:{}", target.as_str());
+        let unbootable_value = getvar_value(&unbootable, &unbootable_name).unwrap_or_default();
         match crate::parse::sideload_post_state(&current_slot, &unbootable_value, target, source) {
             crate::parse::Verdict::Ok => Ok(()),
             crate::parse::Verdict::Failed {
@@ -682,9 +744,11 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         aliases: &AliasTable,
         devices: &DeviceTable,
     ) -> Result<DeviceInfo, DeviceError> {
-        let args = argv::with_serial(serial, &["getvar", "all"]);
+        let serial_ty = catalogue_serial(serial)?;
         let result = self
-            .run(&self.fastboot, args, self.config.prop_timeout)
+            .run_read(ReadCmd::Fastboot(FastbootRead::GetvarAll {
+                serial: serial_ty,
+            }))
             .await?;
         if !result.success_exit() {
             return Err(command_failed("fastboot getvar all", &result));
@@ -749,14 +813,36 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         Ok(result.stdout_text().trim() == "1")
     }
 
-    async fn run(
+    fn program_for(&self, tool: crate::cmd::Tool) -> &Path {
+        match tool {
+            crate::cmd::Tool::Adb => &self.adb,
+            crate::cmd::Tool::Fastboot => &self.fastboot,
+        }
+    }
+
+    fn exe_for(&self, program: &Path) -> Result<VerifiedExe, DeviceError> {
+        let guard = self.verified.lock().expect("verified tools");
+        if let Some(tools) = guard.as_ref() {
+            if tools.adb.path() == program {
+                return Ok(tools.adb.clone());
+            }
+            if tools.fastboot.path() == program {
+                return Ok(tools.fastboot.clone());
+            }
+        }
+        drop(guard);
+        resolve_tool(program).map_err(|err| DeviceError::Message(err.to_string()))
+    }
+
+    async fn run_tool(
         &self,
         program: &Path,
-        args: Vec<String>,
-        timeout: Duration,
+        command: CatalogueCommand,
+        limits: RunLimits,
     ) -> Result<RunResult, DeviceError> {
+        let exe = self.exe_for(program)?;
         self.runner
-            .run(Invocation::tied(program, args, timeout))
+            .run(&exe, &command, limits)
             .await
             .map_err(DeviceError::from)
     }
@@ -899,7 +985,7 @@ pub trait DeviceTransport: Send + Sync {
         -> impl std::future::Future<Output = Result<Vec<ScanEntry>, DeviceError>> + Send;
     fn state(
         &self,
-        serial: &str,
+        serial: &DeviceSerial,
     ) -> impl std::future::Future<Output = Result<Mode, DeviceError>> + Send;
     fn device_info(
         &self,
@@ -924,7 +1010,7 @@ impl<R: CommandRunner> DeviceTransport for PlatformToolsTransport<R> {
 
     fn state(
         &self,
-        serial: &str,
+        serial: &DeviceSerial,
     ) -> impl std::future::Future<Output = Result<Mode, DeviceError>> + Send {
         PlatformToolsTransport::state(self, serial)
     }
@@ -948,29 +1034,14 @@ impl<R: CommandRunner> DeviceTransport for PlatformToolsTransport<R> {
     }
 }
 
-fn catalogue_serial(serial: &str) -> Result<crate::cmd::DeviceSerial, DeviceError> {
-    crate::cmd::DeviceSerial::try_from(serial).map_err(|err| DeviceError::Message(err.to_string()))
+fn getvar_value(result: &RunResult, name: &str) -> Option<String> {
+    crate::device::parse::parse_getvar(&result.stdout_text(), &result.stderr_text())
+        .get(name)
+        .cloned()
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-fn last_value(text: &str) -> String {
-    text.lines()
-        .rev()
-        .find_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
-            }
-            Some(
-                line.rsplit(':')
-                    .next()
-                    .unwrap_or(line)
-                    .trim()
-                    .trim_matches('\'')
-                    .to_string(),
-            )
-        })
-        .unwrap_or_default()
+fn catalogue_serial(serial: &str) -> Result<crate::cmd::DeviceSerial, DeviceError> {
+    crate::cmd::DeviceSerial::try_from(serial).map_err(|err| DeviceError::Message(err.to_string()))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -985,8 +1056,13 @@ fn write_size(cmd: &crate::cmd::WriteCmd) -> u64 {
         crate::cmd::WriteCmd::Fastboot(crate::cmd::FastbootWrite::Flash { image, .. }) => {
             image.size_bytes()
         }
-        crate::cmd::WriteCmd::Fastboot(crate::cmd::FastbootWrite::Update { package, .. })
-        | crate::cmd::WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Sideload { package, .. }) => {
+        crate::cmd::WriteCmd::Fastboot(crate::cmd::FastbootWrite::Update { package, .. }) => {
+            crate::timeouts::update_size_bytes(
+                std::path::Path::new(package.path()),
+                package.size_bytes(),
+            )
+        }
+        crate::cmd::WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Sideload { package, .. }) => {
             package.size_bytes()
         }
         crate::cmd::WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Push { src, .. }) => match src {

@@ -24,7 +24,7 @@ pub use error::ProcError;
 pub use forbid::is_forbidden_program;
 pub use lines::StreamLine;
 pub use scripted::{ScriptedResponse, ScriptedRunner};
-pub use system::SystemRunner;
+pub(crate) use system::SystemRunner;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -46,40 +46,31 @@ pub enum ProcessGroup {
     Detached,
 }
 
-/// One argv invocation. `program` is an absolute path.
-#[derive(Clone, Debug)]
-pub struct Invocation {
+/// One recorded argv call. Tests read this. It cannot start a process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordedCall {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub timeout: Duration,
     pub watchdog: Option<Duration>,
-    pub group: ProcessGroup,
+    pub finalising: Option<Duration>,
 }
 
-impl Invocation {
-    /// Build an invocation that dies with Flashwright.
-    pub fn tied(program: impl Into<PathBuf>, args: Vec<String>, timeout: Duration) -> Self {
+/// Timers for one catalogue command.
+#[derive(Clone, Copy, Debug)]
+pub struct RunLimits {
+    pub timeout: Duration,
+    pub watchdog: Option<Duration>,
+    pub finalising: Option<Duration>,
+}
+
+impl RunLimits {
+    pub(crate) fn from_budget(budget: &crate::timeouts::StepBudget) -> Self {
         Self {
-            program: program.into(),
-            args,
-            timeout,
-            watchdog: None,
-            group: ProcessGroup::TiedToParent,
+            timeout: budget.timeout,
+            watchdog: budget.watchdog,
+            finalising: budget.finalising,
         }
-    }
-
-    pub fn with_watchdog(mut self, watchdog: Duration) -> Self {
-        self.watchdog = Some(watchdog);
-        self
-    }
-
-    pub fn detached(mut self) -> Self {
-        self.group = ProcessGroup::Detached;
-        self
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), ProcError> {
-        validate_program(&self.program)
     }
 }
 
@@ -147,11 +138,16 @@ pub fn fastboot_flash_ok(result: &RunResult) -> bool {
     saw_ok
 }
 
-/// Runs one argv process.
+/// Runs one catalogue command on a verified executable.
+///
+/// `VerifiedExe` and `CatalogueCommand` have no public constructors, so a
+/// caller outside this crate cannot assemble an arbitrary argv.
 pub trait CommandRunner: Send + Sync {
     fn run(
         &self,
-        invocation: Invocation,
+        exe: &crate::exe::VerifiedExe,
+        command: &crate::cmd::CatalogueCommand,
+        limits: RunLimits,
     ) -> impl std::future::Future<Output = Result<RunResult, ProcError>> + Send;
 }
 

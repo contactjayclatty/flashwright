@@ -1,0 +1,15 @@
+error[E0603]: unit struct `SystemRunner` is private
+ --> tests/compile_fail/system_runner.rs:2:43
+  |
+2 |     let _runner = flashwright_core::proc::SystemRunner;
+  |                                           ^^^^^^^^^^^^ private unit struct
+  |
+note: the unit struct `SystemRunner` is defined here
+ --> src/proc/mod.rs
+  |
+  | pub(crate) use system::SystemRunner;
+  |                ^^^^^^^^^^^^^^^^^^^^
+help: import `SystemRunner` directly
+  |
+2 |     let _runner = flashwright_core::proc::system::SystemRunner::SystemRunner;
+  |                                           ++++++++++++++++++++++

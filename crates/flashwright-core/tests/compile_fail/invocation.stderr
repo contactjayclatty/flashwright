@@ -1,0 +1,5 @@
+error[E0433]: failed to resolve: could not find `Invocation` in `proc`
+ --> tests/compile_fail/invocation.rs:2:41
+  |
+2 |     let _call = flashwright_core::proc::Invocation::tied(
+  |                                         ^^^^^^^^^^ could not find `Invocation` in `proc`

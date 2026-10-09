@@ -1,0 +1,5 @@
+error[E0422]: cannot find struct, variant or union type `PlanDraft` in module `flashwright_core::wizard`
+ --> tests/compile_fail/plan_draft.rs:2:43
+  |
+2 |     let _plan = flashwright_core::wizard::PlanDraft {
+  |                                           ^^^^^^^^^ not found in `flashwright_core::wizard`

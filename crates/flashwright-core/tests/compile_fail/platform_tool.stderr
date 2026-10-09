@@ -1,0 +1,11 @@
+error[E0603]: function `platform_tool` is private
+ --> tests/compile_fail/platform_tool.rs:2:40
+  |
+2 |     let _tool = flashwright_core::exe::platform_tool;
+  |                                        ^^^^^^^^^^^^^ private function
+  |
+note: the function `platform_tool` is defined here
+ --> src/exe.rs
+  |
+  | pub(crate) fn platform_tool(path: &Path, expected_sha256: &str) -> Result<VerifiedExe, ProcError> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

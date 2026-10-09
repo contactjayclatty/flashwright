@@ -19,6 +19,50 @@ pub(crate) fn command(program: &OsStr) -> tokio::process::Command {
     tokio::process::Command::new(program)
 }
 
+/// Remember the program and arguments that are about to be spawned.
+pub(crate) fn note_spawn(program: &std::path::Path, args: &[String]) {
+    #[cfg(test)]
+    {
+        SPAWN_LOG
+            .lock()
+            .expect("spawn log")
+            .push((program.display().to_string(), args.to_vec()));
+    }
+    #[cfg(not(test))]
+    {
+        let _ = (program, args);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn spawn_log() -> Vec<(String, Vec<String>)> {
+    SPAWN_LOG.lock().expect("spawn log").clone()
+}
+
+#[cfg(test)]
+pub(crate) fn clear_spawn_log() {
+    SPAWN_LOG.lock().expect("spawn log").clear();
+}
+
+#[cfg(test)]
+static SPAWN_LOG: std::sync::Mutex<Vec<(String, Vec<String>)>> = std::sync::Mutex::new(Vec::new());
+
+/// When set on this thread, Linux tests spawn `strace` in front of the real program.
+#[cfg(all(test, unix))]
+pub(crate) fn set_exec_trace(path: Option<std::path::PathBuf>) {
+    EXEC_TRACE.with(|slot| *slot.borrow_mut() = path);
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn exec_trace() -> Option<std::path::PathBuf> {
+    EXEC_TRACE.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static EXEC_TRACE: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 pub(crate) fn command_for(exe: &VerifiedExe) -> tokio::process::Command {
     debug_assert!(exe.path().is_absolute());
     command(exe.path().as_os_str())

@@ -8,10 +8,12 @@ use std::path::Path;
 
 use crate::device::{DeviceError, Partition, Slot};
 
+#[allow(dead_code)]
 pub fn devices_long() -> Vec<String> {
     vec!["devices".into(), "-l".into()]
 }
 
+#[allow(dead_code)]
 pub fn with_serial(serial: &str, tail: &[&str]) -> Vec<String> {
     let mut args = Vec::with_capacity(tail.len() + 2);
     args.push("-s".into());
@@ -20,7 +22,8 @@ pub fn with_serial(serial: &str, tail: &[&str]) -> Vec<String> {
     args
 }
 
-pub fn flash_args(
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn flash_args(
     serial: &str,
     slot: Slot,
     partition: Partition,
@@ -42,7 +45,8 @@ pub fn flash_args(
     ])
 }
 
-pub fn set_active_args(serial: &str, slot: Slot) -> Vec<String> {
+#[allow(dead_code)]
+pub(crate) fn set_active_args(serial: &str, slot: Slot) -> Vec<String> {
     vec![
         "-s".into(),
         serial.into(),
@@ -50,7 +54,8 @@ pub fn set_active_args(serial: &str, slot: Slot) -> Vec<String> {
     ]
 }
 
-pub fn update_args(serial: &str, slot: Slot, package: &Path) -> Vec<String> {
+#[allow(dead_code)]
+pub(crate) fn update_args(serial: &str, slot: Slot, package: &Path) -> Vec<String> {
     vec![
         "-s".into(),
         serial.into(),
@@ -62,7 +67,8 @@ pub fn update_args(serial: &str, slot: Slot, package: &Path) -> Vec<String> {
     ]
 }
 
-pub fn contains_slot_all(args: &[String]) -> bool {
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn contains_slot_all(args: &[String]) -> bool {
     args.windows(2)
         .any(|pair| pair[0] == "--slot" && pair[1] == "all")
         || args

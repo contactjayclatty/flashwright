@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use flashwright_tools::{ToolInvoker, ToolOutput, ToolsError};
 
-use crate::proc::{CommandRunner, Invocation, ScriptedRunner, SystemRunner};
+use crate::cmd::{read_argv, AdbHostRead, CatalogueCommand, FastbootRead, ReadCmd};
+use crate::exe::measure_platform_tool;
+use crate::proc::{CommandRunner, RunLimits, ScriptedRunner, SystemRunner};
 
 impl ToolInvoker for ScriptedRunner {
     async fn invoke(
@@ -38,12 +40,23 @@ async fn run_tool<R: CommandRunner>(
     args: &[String],
     detached: bool,
 ) -> Result<ToolOutput, ToolsError> {
-    let mut invocation = Invocation::tied(program, args.to_vec(), Duration::from_secs(15));
+    let mut command = catalogue_probe(program, args)?;
     if detached {
-        invocation = invocation.detached();
+        command = command.detached();
     }
+    let exe = measure_platform_tool(program).map_err(|err| ToolsError::Version {
+        detail: err.to_string(),
+    })?;
     let result = runner
-        .run(invocation)
+        .run(
+            &exe,
+            &command,
+            RunLimits {
+                timeout: Duration::from_secs(15),
+                watchdog: None,
+                finalising: None,
+            },
+        )
         .await
         .map_err(|err| ToolsError::Version {
             detail: err.to_string(),
@@ -53,4 +66,32 @@ async fn run_tool<R: CommandRunner>(
         stdout: result.stdout_text(),
         ok: result.success_exit(),
     })
+}
+
+/// Version and adb-server probes are catalogue commands. Anything else is refused.
+fn catalogue_probe(program: &Path, args: &[String]) -> Result<CatalogueCommand, ToolsError> {
+    let name = program
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let adb = matches!(name.as_str(), "adb" | "adb.exe");
+    let fastboot = matches!(name.as_str(), "fastboot" | "fastboot.exe");
+    let read = if adb && args == ["version".to_string()] {
+        ReadCmd::AdbHost(AdbHostRead::Version)
+    } else if adb && args == ["kill-server".to_string()] {
+        ReadCmd::AdbHost(AdbHostRead::KillServer)
+    } else if adb && args == ["start-server".to_string()] {
+        ReadCmd::AdbHost(AdbHostRead::StartServer)
+    } else if fastboot && args == ["--version".to_string()] {
+        ReadCmd::Fastboot(FastbootRead::Version)
+    } else {
+        return Err(ToolsError::Version {
+            detail: "only a catalogue platform-tools probe may run".into(),
+        });
+    };
+    let rendered = read_argv(&read).map_err(|err| ToolsError::Version {
+        detail: err.to_string(),
+    })?;
+    Ok(CatalogueCommand::from_rendered(rendered))
 }

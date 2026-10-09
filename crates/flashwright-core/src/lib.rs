@@ -163,12 +163,23 @@ impl<R: CommandRunner + ToolInvoker + 'static> Session<R> {
         let report =
             evaluate_installation(dir, &self.names, &self.policy, self.runner.as_ref(), host)
                 .await?;
-        self.transport = Some(PlatformToolsTransport::new(
+        let transport = PlatformToolsTransport::new(
             Arc::clone(&self.runner),
             report.adb.clone(),
             report.fastboot.clone(),
             self.config.clone(),
-        ));
+        );
+        let writes = report.verdict.allows_writes();
+        transport.note_tools_verdict(writes);
+        if writes {
+            let adb = crate::exe::platform_tool(&report.adb, &report.files.adb_sha256)
+                .map_err(|err| CoreError::ToolsBlocked(err.to_string()))?;
+            let fastboot =
+                crate::exe::platform_tool(&report.fastboot, &report.files.fastboot_sha256)
+                    .map_err(|err| CoreError::ToolsBlocked(err.to_string()))?;
+            transport.install_verified(adb, fastboot, None);
+        }
+        self.transport = Some(transport);
         let _ = self.events.send(EngineEvent::Log {
             v: EVENT_VERSION,
             message: format!(
