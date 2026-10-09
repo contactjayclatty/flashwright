@@ -71,6 +71,8 @@ export interface PlanPreview {
   gates: GateView[];
   steps: Step[];
   prefer_dry_run: boolean;
+  kind?: string;
+  dry_run?: boolean;
 }
 
 export interface FirmwareReport {
@@ -152,4 +154,5 @@ export interface EngineApi {
   back(): Promise<Snapshot>;
   openExternal(urlId: string): Promise<Snapshot>;
   recoveryPlan(optionId: string): Promise<Snapshot>;
+  cancel(): Promise<Snapshot>;
 }

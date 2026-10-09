@@ -5,7 +5,6 @@ import "../theme/flashwright-ui.css";
 import "../theme/fonts.css";
 import "../theme/extras.css";
 import "../theme/dark.css";
-import { FIXTURE_OTA_NAME, FIXTURE_SHA256 } from "./mock";
 import { createEngine, pickPackage, runningInTauri } from "./ipc";
 import type { EngineApi, Phase, Snapshot } from "./types";
 import { logHost, mountLog, renderShell, type ShellModel } from "./views";
@@ -32,6 +31,7 @@ class Wizard {
   private confirmFocus = false;
   private armTimer = 0;
   private overlay: ShellModel["overlay"] = "none";
+  private stopAsk = false;
   private localError: string | null = null;
   private readonly themeError: string | null = themeReady()
     ? null
@@ -100,6 +100,7 @@ class Wizard {
       dryPreference: this.dryPreference,
       confirm: this.confirmOpen ? { secondsLeft, armed } : null,
       overlay: this.overlay,
+      stopAsk: this.stopAsk,
       localError: this.themeError ?? this.localError,
       tauri: this.tauri,
     };
@@ -111,6 +112,13 @@ class Wizard {
     if (!model || !root) {
       return;
     }
+    const dialogLive = root.querySelector("[role='alertdialog']");
+    const countdownOnly = this.confirmOpen && dialogLive !== null && !this.confirmFocus;
+    if (countdownOnly) {
+      this.patchConfirm(root);
+      this.markBackground(root);
+      return;
+    }
     root.replaceChildren(renderShell(model));
     const themeName = sessionStorage.getItem("fw-theme");
     if (themeName === "dark") {
@@ -120,11 +128,41 @@ class Wizard {
     if (host) {
       mountLog(host, model.lines);
     }
-    if (this.confirmFocus) {
+    this.markBackground(root);
+    if (this.confirmFocus || this.stopAsk) {
       this.confirmFocus = false;
       window.requestAnimationFrame(() => {
         document.querySelector<HTMLButtonElement>(".fw-dialog .fw-btn--default")?.focus();
       });
+    }
+  }
+
+  private patchConfirm(root: ParentNode): void {
+    const button = root.querySelector<HTMLButtonElement>("[data-action='confirm-run'], [data-action='confirm-patch']");
+    if (!button) {
+      return;
+    }
+    const armed = Date.now() >= this.confirmUntil;
+    const patch = button.dataset.action === "confirm-patch";
+    button.disabled = !armed;
+    const secondsLeft = Math.max(0, Math.ceil((this.confirmUntil - Date.now()) / 1000));
+    const rest = patch ? "atch now" : armed ? "lash now" : `lash now (${secondsLeft})`;
+    button.textContent = "";
+    const mark = document.createElement("span");
+    mark.className = "fw-key";
+    mark.textContent = patch ? "P" : "F";
+    button.append(mark, rest);
+  }
+
+  private markBackground(root: ParentNode): void {
+    const windowEl = root.querySelector(".fw-app > .fw-window");
+    const dialog = root.querySelector("[role='alertdialog'], [role='dialog']");
+    if (windowEl instanceof HTMLElement) {
+      if (dialog) {
+        windowEl.setAttribute("inert", "");
+      } else {
+        windowEl.removeAttribute("inert");
+      }
     }
   }
 
@@ -135,6 +173,10 @@ class Wizard {
     }
     this.jobKey = key;
     window.clearTimeout(this.playTimer);
+    if (snap.job.state === "cancelled") {
+      this.playing = false;
+      return;
+    }
     if ((snap.phase === "done" || snap.phase === "flash") && snap.job.state === "succeeded" && snap.job.lines.length > 0) {
       this.shown = 0;
       this.playing = true;
@@ -179,9 +221,9 @@ class Wizard {
     }
   }
 
-  private openConfirm(): void {
+  private openConfirm(patch = false): void {
     this.confirmOpen = true;
-    this.confirmUntil = Date.now() + 2000;
+    this.confirmUntil = patch ? Date.now() : Date.now() + 2000;
     this.confirmFocus = true;
     window.clearTimeout(this.armTimer);
     const tick = (): void => {
@@ -252,11 +294,16 @@ class Wizard {
       case "back":
         await this.refresh(this.engine.back());
         break;
-      case "sample":
-        this.draftName = FIXTURE_OTA_NAME;
-        this.draftSha = FIXTURE_SHA256;
+      case "sample": {
+        if (!import.meta.env.DEV) {
+          break;
+        }
+        const fixtures = await import("./mock");
+        this.draftName = fixtures.FIXTURE_OTA_NAME;
+        this.draftSha = fixtures.FIXTURE_SHA256;
         await this.refresh(this.engine.openFirmware(this.draftName, this.draftSha));
         break;
+      }
       case "check-firmware":
         await this.refresh(this.engine.openFirmware(this.draftName, this.draftSha));
         break;
@@ -269,7 +316,7 @@ class Wizard {
         }
         break;
       case "flash":
-        this.openConfirm();
+        this.openConfirm(this.snap.plan?.kind === "prepare_patch");
         break;
       case "confirm-run":
         if (this.snap.plan && Date.now() >= this.confirmUntil) {
@@ -286,9 +333,17 @@ class Wizard {
         this.render();
         break;
       case "cancel-job":
+        this.stopAsk = true;
+        this.render();
+        break;
+      case "stop-confirm":
         this.playing = false;
         window.clearTimeout(this.playTimer);
-        this.shown = this.snap.job.lines.length;
+        this.stopAsk = false;
+        await this.refresh(this.engine.cancel());
+        break;
+      case "cancel-stop":
+        this.stopAsk = false;
         this.render();
         break;
       case "backups":
@@ -400,8 +455,15 @@ class Wizard {
       if (key === "f") {
         event.preventDefault();
         const armed = document.querySelector<HTMLButtonElement>("[data-action='confirm-run']:not(:disabled)");
-        const open = document.querySelector<HTMLButtonElement>("[data-action='flash']");
+        const open = document.querySelector("[role='alertdialog']")
+          ? null
+          : document.querySelector<HTMLButtonElement>("[data-action='flash']");
         (armed ?? open)?.click();
+        return;
+      }
+      if (key === "p") {
+        event.preventDefault();
+        document.querySelector<HTMLButtonElement>("[data-action='confirm-patch']:not(:disabled)")?.click();
         return;
       }
       if (action === "log") {
@@ -415,8 +477,34 @@ class Wizard {
         return;
       }
     }
+    if (event.key === "Tab") {
+      const dialog = document.querySelector("[role='alertdialog']");
+      if (dialog) {
+        const buttons = [...dialog.querySelectorAll<HTMLButtonElement>("button")].filter((button) => !button.disabled);
+        if (buttons.length > 0) {
+          event.preventDefault();
+          const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+          const next = event.shiftKey
+            ? buttons[(index - 1 + buttons.length) % buttons.length]
+            : buttons[(index + 1) % buttons.length];
+          next?.focus();
+        }
+        return;
+      }
+    }
     if (event.key === "Escape") {
-      document.querySelector<HTMLButtonElement>("[data-action='cancel-dialog'], [data-action='close-overlay']")?.click();
+      const cancel = document.querySelector<HTMLButtonElement>(
+        "[data-action='cancel-dialog'], [data-action='cancel-stop'], [data-action='close-overlay']",
+      );
+      if (cancel) {
+        cancel.click();
+        return;
+      }
+      if (this.playing || this.visiblePhase() === "flash") {
+        event.preventDefault();
+        this.stopAsk = true;
+        this.render();
+      }
     }
     if (event.key === "Enter" && !event.altKey && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
       const target = event.target;
@@ -430,5 +518,4 @@ class Wizard {
   }
 }
 
-const wizard = new Wizard(createEngine());
-void wizard.start();
+void createEngine().then((engine) => new Wizard(engine).start());

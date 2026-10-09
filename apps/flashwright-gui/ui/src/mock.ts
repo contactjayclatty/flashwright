@@ -42,7 +42,7 @@ function passGates(): GateView[] {
     gate("G07", "block", "pass", "No downgrade", "The package is newer than the phone."),
     gate("G08", "block", "pass", "Patch level", "The image patch level matches the package."),
     gate("G09", "block", "pass", "Patched image", "The patched image matches the stock image that was prepared."),
-    gate("G10", "block", "pass", "Root tool", "The on-device root tool is new enough."),
+    gate("G10", "block", "pass", "Magisk app", "The Magisk app is new enough."),
     gate("G11", "block", "pass", "Battery", "Battery is 82%."),
     gate("G12", "block", "pass", "Disk space", "The working disk has enough free space."),
     gate("G13", "block", "pass", "Phone space", "The phone has enough free space."),
@@ -212,7 +212,7 @@ export class MockEngine implements EngineApi {
         both_slots_enabled: false,
         both_slots_reason:
           "Writing both slots removes your fallback and is risky with anti-rollback. Coming later in Expert mode.",
-        root_tool_label: "On-device root tool",
+        root_tool_label: "Magisk app",
         root_tool_version: selected?.root_present ? `stable ${selected.root_tool_version}` : "—",
         backup_folder: "%LOCALAPPDATA%\\Flashwright\\backups",
       },
@@ -404,11 +404,11 @@ export class MockEngine implements EngineApi {
         {
           ts: "13:41:02",
           level: "ok",
-          text: "Updated to HQ1A.MOCK.002. Root is working (root tool 30.7).",
+          text: "Updated to HQ1A.MOCK.002. Root is working (Magisk app 30.7).",
         },
       ],
       result_title: "Updated to HQ1A.MOCK.002",
-      result_body: "Root is working (root tool 30.7).",
+      result_body: "Root is working (Magisk app 30.7).",
       recovery: [],
       cancel_mode: "immediate",
     };
@@ -428,6 +428,17 @@ export class MockEngine implements EngineApi {
     this.notice = known
       ? { level: "info", message: "That page is allow-listed. Flashwright opens it in your browser.", gates: [] }
       : { level: "block", message: "That link is not on the allow list.", gates: [] };
+    return this.snapshot();
+  }
+
+  async cancel(): Promise<Snapshot> {
+    this.job = {
+      ...this.job,
+      state: "cancelled",
+      status_line: "Stopped after this step.",
+      result_title: "Stopped",
+      result_body: "Stopped after this step.",
+    };
     return this.snapshot();
   }
 

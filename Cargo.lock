@@ -1007,7 +1007,7 @@ dependencies = [
 name = "flashwright-gui"
 version = "0.1.0"
 dependencies = [
- "flashwright-wizard",
+ "flashwright-core",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -1061,19 +1061,6 @@ dependencies = [
  "thiserror 2.0.21",
  "toml 0.8.23",
  "windows",
-]
-
-[[package]]
-name = "flashwright-wizard"
-version = "0.1.0"
-dependencies = [
- "hex",
- "serde",
- "serde_jcs",
- "serde_json",
- "sha2",
- "thiserror 2.0.21",
- "uuid",
 ]
 
 [[package]]

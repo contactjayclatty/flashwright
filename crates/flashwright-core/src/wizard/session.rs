@@ -202,10 +202,7 @@ impl<R: CommandRunner> WizardSession<R> {
         if dry_run {
             return Err(CoreError::DryRunPlan);
         }
-        let held = self
-            .held
-            .take()
-            .expect("review plan");
+        let held = self.held.take().expect("review plan");
         // Mark the plan used before step 1. A second call returns AlreadyUsed.
         self.consumed.insert(held.hash.clone());
         self.phase = Phase::Flash;
@@ -256,11 +253,13 @@ impl<R: CommandRunner> WizardSession<R> {
             return Err(CoreError::AlreadyUsed);
         }
         if self.phase != Phase::Review {
-            return Err(if matches!(self.phase, Phase::Done | Phase::Flash | Phase::Recovery) {
-                CoreError::AlreadyUsed
-            } else {
-                CoreError::WrongState
-            });
+            return Err(
+                if matches!(self.phase, Phase::Done | Phase::Flash | Phase::Recovery) {
+                    CoreError::AlreadyUsed
+                } else {
+                    CoreError::WrongState
+                },
+            );
         }
         let Some(held) = self.held.as_ref() else {
             return Err(CoreError::AlreadyUsed);

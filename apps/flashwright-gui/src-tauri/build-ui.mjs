@@ -18,10 +18,11 @@ if (!existsSync(manifest)) {
   process.exit(1);
 }
 
-const result = spawnSync("npm", ["run", mode], {
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const result = spawnSync(npm, ["run", mode], {
   cwd: uiDir,
   stdio: "inherit",
-  shell: true,
+  shell: false,
 });
 
 if (result.error) {

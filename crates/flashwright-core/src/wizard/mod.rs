@@ -17,20 +17,24 @@ mod session;
 mod steps;
 
 pub use device::{
-    inactive_slot, unlocked_from_props, DeviceInfo, DeviceSummary, DeviceTransport, EmptyTransport, Mode,
-    Partition, Slot,
+    inactive_slot, unlocked_from_props, DeviceInfo, DeviceSummary, DeviceTransport, EmptyTransport,
+    Mode, Partition, Slot,
 };
 pub use engine::Engine;
 pub use links::external_url;
 pub use model::{
-    BackupSet, BurstStats, ChoiceView, DriverStatus, ExternalLink, FirmwareRef, FirmwareReport, JobView,
-    LogLine, Notice, PlanKind, RecoveryOption, Snapshot, ToolsStatus, WizardEvent, WizardPlan,
+    BackupSet, BurstStats, ChoiceView, DriverStatus, ExternalLink, FirmwareRef, FirmwareReport,
+    JobView, LogLine, Notice, PlanKind, RecoveryOption, Snapshot, ToolsStatus, WizardEvent,
+    WizardPlan,
 };
 pub use session::{
-    plan_code, plan_hash, Clock, FixedClock, Phase, PlanDraft, PlanPreview, PlanStep, PlanStepView, RunReport,
-    SystemClock, WizardSession,
+    plan_code, plan_hash, Clock, FixedClock, Phase, PlanDraft, PlanPreview, PlanStep, PlanStepView,
+    RunReport, SystemClock, WizardSession,
 };
 pub use steps::{GateView, Route, Step, StepClass, Tool, SCHEMA};
+
+#[cfg(test)]
+mod qa;
 
 use std::marker::PhantomData;
 

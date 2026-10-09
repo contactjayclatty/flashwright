@@ -16,7 +16,7 @@ pub mod timeouts;
 pub mod token;
 pub mod wizard;
 
-#[cfg(any(test, all(feature = "mock", debug_assertions)))]
+#[cfg(any(test, feature = "mock", debug_assertions))]
 pub mod mock;
 
 mod invoke;

@@ -31,10 +31,8 @@ impl Slot {
 
 /// The inactive slot is the other one. An unknown active slot is an error.
 pub fn inactive_slot(active: Option<Slot>) -> Result<Slot, CoreError> {
-    active.map(Slot::other).ok_or_else(|| {
-        CoreError::Rejected {
-            reason: "The active slot is unknown.".to_string(),
-        }
+    active.map(Slot::other).ok_or_else(|| CoreError::Rejected {
+        reason: "The active slot is unknown.".to_string(),
     })
 }
 

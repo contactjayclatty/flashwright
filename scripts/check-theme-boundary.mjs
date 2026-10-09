@@ -12,11 +12,10 @@ const banned = [
   /(?:^|[^a-z])fl-/,
   /--fl-/,
   /pixelflasher/i,
-  /(?<!fw-)\bpixel\b/i,
-  /magisk/i,
-  /\bgoogle\b/i,
   /flintlock/i,
 ];
+
+const allowedName = /Magisk app|Magisk's patcher|Google Pixel|trademarks of Google LLC|Magisk is a project by topjohnwu/i;
 
 async function filesIn(dir) {
   const entries = await readdir(dir, { withFileTypes: true });
@@ -37,6 +36,10 @@ for (const file of await filesIn(root)) {
   const text = await readFile(file, "utf8");
   const lines = text.split("\n");
   lines.forEach((line, index) => {
+    const names = line.replace(/fw-pixel/g, "");
+    if (/\b(magisk|google|pixel|android)\b/i.test(names) && !allowedName.test(line)) {
+      hits.push(`${path.relative(process.cwd(), file)}:${index + 1} descriptive name outside the allowed phrases ${line.trim()}`);
+    }
     for (const rule of banned) {
       if (rule.test(line)) {
         hits.push(`${path.relative(process.cwd(), file)}:${index + 1} ${rule} ${line.trim()}`);
