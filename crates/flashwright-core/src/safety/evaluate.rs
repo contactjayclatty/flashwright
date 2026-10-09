@@ -38,48 +38,58 @@ pub struct GateBlock {
     pub reason: String,
 }
 
-/// Facts the table gates read. Boolean checks cover the gates that are not a table.
+/// Facts the table gates read. Filled from typed device reads, not from the caller.
 #[derive(Clone, Debug)]
-pub struct SafetyFacts {
-    pub device_codename: String,
-    pub firmware_codename: String,
-    pub firmware_filename: String,
-    pub active_slot: Option<Slot>,
-    pub target_partition: Partition,
-    pub bootloader_a: Option<String>,
-    pub bootloader_b: Option<String>,
-    pub device_bootloader: Option<String>,
-    pub firmware_bootloader: Option<String>,
-    pub api_level: Option<u32>,
-    pub device_spl: Option<String>,
-    pub firmware_spl: Option<String>,
-    pub image_spl: Option<String>,
-    pub image_fingerprint: Option<String>,
-    pub firmware_fingerprint: Option<String>,
-    pub device_build: Option<String>,
-    pub device_timestamp: Option<u64>,
-    pub firmware_timestamp: Option<u64>,
-    pub magisk_label: Option<String>,
-    pub magisk_code: Option<u32>,
-    pub magisk_package: Option<String>,
-    pub kernel: Option<String>,
-    pub checks: LegacyChecks,
+pub(crate) struct SafetyFacts {
+    pub(crate) device_codename: String,
+    pub(crate) firmware_codename: String,
+    pub(crate) firmware_filename: String,
+    pub(crate) active_slot: Option<Slot>,
+    pub(crate) target_partition: Partition,
+    pub(crate) bootloader_a: Option<String>,
+    pub(crate) bootloader_b: Option<String>,
+    pub(crate) device_bootloader: Option<String>,
+    pub(crate) firmware_bootloader: Option<String>,
+    pub(crate) api_level: Option<u32>,
+    pub(crate) device_spl: Option<String>,
+    pub(crate) firmware_spl: Option<String>,
+    pub(crate) image_spl: Option<String>,
+    pub(crate) image_fingerprint: Option<String>,
+    pub(crate) firmware_fingerprint: Option<String>,
+    pub(crate) device_build: Option<String>,
+    pub(crate) device_timestamp: Option<u64>,
+    pub(crate) firmware_timestamp: Option<u64>,
+    pub(crate) magisk_label: Option<String>,
+    pub(crate) magisk_code: Option<u32>,
+    pub(crate) magisk_package: Option<String>,
+    pub(crate) kernel: Option<String>,
+    /// Codename read from the phone and stored on the plan. G04 compares firmware to this.
+    pub(crate) plan_device: String,
+    pub(crate) authorised_devices: u32,
+    pub(crate) unlocked: Option<bool>,
+    pub(crate) tools_verified: bool,
+    pub(crate) tools_match: bool,
+    pub(crate) adb_server_ok: bool,
+    pub(crate) partition_bytes: Option<u64>,
+    pub(crate) pending_ota: Option<bool>,
+    pub(crate) checks: LegacyChecks,
 }
 
-/// Pass or fail for the gates that are not computed from a table.
+/// Pass or fail for the gates that are not computed from a phone read.
 #[derive(Clone, Debug)]
-pub struct LegacyChecks {
+pub(crate) struct LegacyChecks {
     failing: Vec<&'static str>,
 }
 
 impl LegacyChecks {
-    pub fn pass() -> Self {
+    pub(crate) fn pass() -> Self {
         Self {
             failing: Vec::new(),
         }
     }
 
-    pub fn fail(id: &'static str) -> Self {
+    #[cfg(test)]
+    pub(crate) fn fail(id: &'static str) -> Self {
         Self { failing: vec![id] }
     }
 
@@ -89,8 +99,45 @@ impl LegacyChecks {
 }
 
 impl SafetyFacts {
+    pub(crate) fn blank() -> Self {
+        Self {
+            device_codename: String::new(),
+            firmware_codename: String::new(),
+            firmware_filename: String::new(),
+            active_slot: None,
+            target_partition: Partition::InitBoot,
+            bootloader_a: None,
+            bootloader_b: None,
+            device_bootloader: None,
+            firmware_bootloader: None,
+            api_level: None,
+            device_spl: None,
+            firmware_spl: None,
+            image_spl: None,
+            image_fingerprint: None,
+            firmware_fingerprint: None,
+            device_build: None,
+            device_timestamp: None,
+            firmware_timestamp: None,
+            magisk_label: None,
+            magisk_code: None,
+            magisk_package: None,
+            kernel: None,
+            plan_device: String::new(),
+            authorised_devices: 0,
+            unlocked: None,
+            tools_verified: false,
+            tools_match: false,
+            adb_server_ok: false,
+            partition_bytes: None,
+            pending_ota: None,
+            checks: LegacyChecks::pass(),
+        }
+    }
+
     /// Synthetic Pixel 9 Pro XL facts that pass every table gate.
-    pub fn komodo_ready() -> Self {
+    #[cfg(test)]
+    pub(crate) fn komodo_ready() -> Self {
         Self {
             device_codename: "komodo".into(),
             firmware_codename: "komodo".into(),
@@ -114,6 +161,14 @@ impl SafetyFacts {
             magisk_code: Some(30700),
             magisk_package: Some(OFFICIAL_MAGISK.into()),
             kernel: Some("6.1.0-android14-synthetic".into()),
+            plan_device: "komodo".into(),
+            authorised_devices: 1,
+            unlocked: Some(true),
+            tools_verified: true,
+            tools_match: true,
+            adb_server_ok: true,
+            partition_bytes: Some(64 * 1024 * 1024),
+            pending_ota: Some(false),
             checks: LegacyChecks::pass(),
         }
     }
@@ -127,10 +182,19 @@ pub fn gate_ids() -> &'static [&'static str] {
     ]
 }
 
-pub fn evaluate(
+pub(crate) fn evaluate(
     steps: &[PlanStep],
     facts: Option<&SafetyFacts>,
     backup: Option<&BackupState>,
+) -> Vec<GateDecision> {
+    evaluate_acked(steps, facts, backup, &[])
+}
+
+pub(crate) fn evaluate_acked(
+    steps: &[PlanStep],
+    facts: Option<&SafetyFacts>,
+    backup: Option<&BackupState>,
+    acks: &[String],
 ) -> Vec<GateDecision> {
     tables::log_ported_items();
     let tables = tables::tables();
@@ -138,7 +202,41 @@ pub fn evaluate(
     let rendered = rendered_args(steps);
     gate_ids()
         .iter()
-        .map(|id| decide(id, steps, facts, backup, tables, image_write, &rendered))
+        .map(|id| {
+            let mut decision = decide(id, steps, facts, backup, tables, image_write, &rendered);
+            if decision.blocked
+                && decision.severity == Severity::Ack
+                && acks.iter().any(|ack| ack == decision.id)
+            {
+                decision.blocked = false;
+            }
+            decision
+        })
+        .collect()
+}
+
+/// G03, G15, G21, and G22 for one step. A miss blocks that step.
+pub(crate) fn pre_step_blocks(step: &PlanStep, facts: Option<&SafetyFacts>) -> Vec<GateDecision> {
+    ["G03", "G15", "G21", "G22"]
+        .into_iter()
+        .filter_map(|id| {
+            let (blocked, reason) = match id {
+                "G03" => g03_step(step, facts),
+                "G15" => g15_step(step, facts),
+                "G21" => g21(facts),
+                "G22" => g22(facts),
+                _ => (false, String::new()),
+            };
+            if !blocked {
+                return None;
+            }
+            Some(GateDecision {
+                id: static_id(id),
+                severity: Severity::Block,
+                blocked: true,
+                reason,
+            })
+        })
         .collect()
 }
 
@@ -205,14 +303,20 @@ fn decide(
 ) -> GateDecision {
     let severity = severity_of(id);
     let (blocked, reason) = match id {
+        "G02" => g02(facts),
+        "G03" => g03(steps, facts),
         "G04" => g04(facts, tables, image_write),
         "G07" => g07(facts, image_write),
         "G08" => g08(facts, image_write),
         "G10" => g10(facts, tables, image_write),
-        "G14" => g14(backup, image_write),
+        "G14" => g14(backup, steps, image_write),
+        "G15" => g15(steps, facts),
         "G16" => g16(rendered, tables),
         "G18" => g18(facts, steps),
         "G19" => g19(facts, tables),
+        "G20" => g20(facts, image_write),
+        "G21" => g21(facts),
+        "G22" => g22(facts),
         "ARB" => arb(facts, steps, tables),
         "SLOT" => slot_gate(steps, facts, tables, rendered),
         "OFF" => off_gate(steps, rendered, tables),
@@ -236,7 +340,7 @@ fn static_id(id: &str) -> &'static str {
 
 fn severity_of(id: &str) -> Severity {
     match id {
-        "G17" | "G20" => Severity::Ack,
+        "G17" | "G19" => Severity::Ack,
         _ => Severity::Block,
     }
 }
@@ -271,32 +375,152 @@ fn legacy_message(id: &str) -> &'static str {
     }
 }
 
+fn g02(facts: Option<&SafetyFacts>) -> (bool, String) {
+    match facts {
+        Some(facts) if facts.authorised_devices == 1 => (false, String::new()),
+        Some(_) => (true, legacy_message("G02").to_string()),
+        None => (
+            true,
+            format!("{} This check was not run.", legacy_message("G02")),
+        ),
+    }
+}
+
+fn g03(steps: &[PlanStep], facts: Option<&SafetyFacts>) -> (bool, String) {
+    if !steps
+        .iter()
+        .any(|step| matches!(step, PlanStep::Write(cmd) if cmd_is_fastboot(cmd)))
+    {
+        return (false, String::new());
+    }
+    match facts.and_then(|facts| facts.unlocked) {
+        Some(true) => (false, String::new()),
+        Some(false) => (true, legacy_message("G03").to_string()),
+        None => (
+            true,
+            format!("{} This check was not run.", legacy_message("G03")),
+        ),
+    }
+}
+
+fn g03_step(step: &PlanStep, facts: Option<&SafetyFacts>) -> (bool, String) {
+    let PlanStep::Write(cmd) = step else {
+        return (false, String::new());
+    };
+    if !cmd_is_fastboot(cmd) {
+        return (false, String::new());
+    }
+    g03(std::slice::from_ref(step), facts)
+}
+
+fn g15(steps: &[PlanStep], facts: Option<&SafetyFacts>) -> (bool, String) {
+    let Some(needed) = image_bytes(steps) else {
+        return (false, String::new());
+    };
+    match facts.and_then(|facts| facts.partition_bytes) {
+        Some(have) if have >= needed => (false, String::new()),
+        Some(_) => (true, legacy_message("G15").to_string()),
+        None => (
+            true,
+            format!("{} This check was not run.", legacy_message("G15")),
+        ),
+    }
+}
+
+fn g15_step(step: &PlanStep, facts: Option<&SafetyFacts>) -> (bool, String) {
+    g15(std::slice::from_ref(step), facts)
+}
+
+fn g20(facts: Option<&SafetyFacts>, image_write: bool) -> (bool, String) {
+    if !image_write {
+        return (false, String::new());
+    }
+    match facts.and_then(|facts| facts.pending_ota) {
+        Some(false) => (false, String::new()),
+        Some(true) => (true, legacy_message("G20").to_string()),
+        None => (true, "A pending system update was not checked.".to_string()),
+    }
+}
+
+fn g21(facts: Option<&SafetyFacts>) -> (bool, String) {
+    match facts {
+        Some(facts) if facts.tools_verified && facts.tools_match => (false, String::new()),
+        Some(_) => (true, legacy_message("G21").to_string()),
+        None => (
+            true,
+            format!("{} This check was not run.", legacy_message("G21")),
+        ),
+    }
+}
+
+fn g22(facts: Option<&SafetyFacts>) -> (bool, String) {
+    match facts {
+        Some(facts) if facts.adb_server_ok => (false, String::new()),
+        Some(_) => (true, legacy_message("G22").to_string()),
+        None => (
+            true,
+            format!("{} This check was not run.", legacy_message("G22")),
+        ),
+    }
+}
+
+fn cmd_is_fastboot(cmd: &WriteCmd) -> bool {
+    matches!(cmd, WriteCmd::Fastboot(_))
+}
+
+fn image_bytes(steps: &[PlanStep]) -> Option<u64> {
+    let mut needed = None;
+    for step in steps {
+        let PlanStep::Write(cmd) = step else {
+            continue;
+        };
+        let size = match cmd {
+            WriteCmd::Fastboot(
+                crate::cmd::FastbootWrite::Flash { image, .. }
+                | crate::cmd::FastbootWrite::Update { package: image, .. },
+            )
+            | WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Sideload { package: image, .. }) => {
+                Some(image.size_bytes())
+            }
+            WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Push { src, .. }) => match src {
+                crate::cmd::HostRef::Image(image) => Some(image.size_bytes()),
+                crate::cmd::HostRef::Asset(_) => None,
+            },
+            _ => None,
+        };
+        if let Some(size) = size {
+            needed = Some(needed.unwrap_or(0).max(size));
+        }
+    }
+    needed
+}
+
 fn g04(facts: Option<&SafetyFacts>, tables: &SafetyTables, image_write: bool) -> (bool, String) {
     let Some(facts) = facts else {
         return missing(image_write, "The phone and the firmware were not compared.");
     };
-    let Some(row) = find_device(tables, &facts.device_codename) else {
-        return (
-            true,
-            format!("{} is not a known device.", facts.device_codename),
-        );
+    let phone = if facts.plan_device.is_empty() {
+        facts.device_codename.as_str()
+    } else {
+        facts.plan_device.as_str()
+    };
+    let Some(row) = find_device(tables, phone) else {
+        return (true, format!("{phone} is not a known device."));
     };
     if !row.ab {
         return (true, "This phone is not an A/B device.".into());
     }
-    if tables.aliases.canonical(&facts.device_codename)
-        != tables.aliases.canonical(&facts.firmware_codename)
-    {
+    if tables.aliases.canonical(phone) != tables.aliases.canonical(&facts.firmware_codename) {
         return (
             true,
             format!(
-                "The firmware is for {}, and this phone is {}.",
-                facts.firmware_codename, facts.device_codename
+                "The firmware is for {}, and this phone is {phone}.",
+                facts.firmware_codename
             ),
         );
     }
     let prefix = filename_prefix(&facts.firmware_filename);
-    if tables.aliases.canonical(prefix) != tables.aliases.canonical(&facts.device_codename) {
+    if tables.aliases.canonical(prefix) != tables.aliases.canonical(phone) {
         return (
             true,
             "The firmware file name does not match this phone.".into(),
@@ -330,10 +554,11 @@ fn g07(facts: Option<&SafetyFacts>, image_write: bool) -> (bool, String) {
     } else {
         return (true, "The security patch dates are missing.".into());
     }
-    if let (Some(firmware), Some(device)) = (facts.firmware_timestamp, facts.device_timestamp) {
-        if firmware < device {
-            return (true, "The firmware build is older than the phone.".into());
-        }
+    let (Some(firmware), Some(device)) = (facts.firmware_timestamp, facts.device_timestamp) else {
+        return (true, "The firmware build timestamp is missing.".into());
+    };
+    if firmware < device {
+        return (true, "The firmware build is older than the phone.".into());
     }
     (false, String::new())
 }
@@ -354,15 +579,16 @@ fn g08(facts: Option<&SafetyFacts>, image_write: bool) -> (bool, String) {
             "The image security patch does not match the firmware.".into(),
         );
     }
-    if let (Some(image_id), Some(firmware_id)) =
+    let (Some(image_id), Some(firmware_id)) =
         (&facts.image_fingerprint, &facts.firmware_fingerprint)
-    {
-        if image_id != firmware_id {
-            return (
-                true,
-                "The image fingerprint does not match the firmware.".into(),
-            );
-        }
+    else {
+        return (true, "The image fingerprint is missing.".into());
+    };
+    if image_id != firmware_id {
+        return (
+            true,
+            "The image fingerprint does not match the firmware.".into(),
+        );
     }
     if !plan_updates_system_from_facts(facts) {
         let device_build = facts
@@ -408,22 +634,27 @@ fn g10(facts: Option<&SafetyFacts>, tables: &SafetyTables, image_write: bool) ->
             return (true, "This Magisk build is on the known-bad list.".into());
         }
     }
-    if let Some(package) = &facts.magisk_package {
-        if package != OFFICIAL_MAGISK || tables.off_limits.packages.iter().any(|id| id == package) {
-            return (true, "This Magisk app is not an official build.".into());
-        }
+    let Some(package) = &facts.magisk_package else {
+        return (
+            true,
+            "The Magisk package was not read from the phone.".into(),
+        );
+    };
+    if package != OFFICIAL_MAGISK || tables.off_limits.packages.iter().any(|id| id == package) {
+        return (true, "This Magisk app is not an official build.".into());
     }
-    if let Some(kernel) = &facts.kernel {
-        if let Some(fragment) = tables
-            .kernels
-            .iter()
-            .find(|fragment| kernel.contains(fragment.as_str()))
-        {
-            return (
-                true,
-                format!("The kernel name contains the known-bad fragment {fragment}."),
-            );
-        }
+    let Some(kernel) = &facts.kernel else {
+        return (true, "The kernel was not read from the phone.".into());
+    };
+    if let Some(fragment) = tables
+        .kernels
+        .iter()
+        .find(|fragment| kernel.contains(fragment.as_str()))
+    {
+        return (
+            true,
+            format!("The kernel name contains the known-bad fragment {fragment}."),
+        );
     }
     let spl = facts
         .firmware_spl
@@ -438,20 +669,47 @@ fn g10(facts: Option<&SafetyFacts>, tables: &SafetyTables, image_write: bool) ->
     (false, String::new())
 }
 
-fn g14(backup: Option<&BackupState>, image_write: bool) -> (bool, String) {
+fn g14(backup: Option<&BackupState>, steps: &[PlanStep], image_write: bool) -> (bool, String) {
     if !image_write {
         return (false, String::new());
     }
+    let Some((serial, slot, partition)) = plan_target(steps) else {
+        return (
+            true,
+            "Stock init_boot has not been backed up and verified.".into(),
+        );
+    };
     match backup {
-        Some(BackupState::Verified(record)) if record.len > 0 && !record.sha256.is_empty() => {
+        Some(BackupState::Verified(set)) if set.matches_plan(&serial, slot, partition) => {
             (false, String::new())
         }
+        Some(BackupState::Verified(_)) => (
+            true,
+            "The backup is for a different phone, slot, or partition.".into(),
+        ),
         Some(BackupState::Blocked(block)) => (true, block.reason.clone()),
         _ => (
             true,
             "Stock init_boot has not been backed up and verified.".into(),
         ),
     }
+}
+
+fn plan_target(steps: &[PlanStep]) -> Option<(String, Slot, Partition)> {
+    for step in steps {
+        if let PlanStep::Write(WriteCmd::Fastboot(crate::cmd::FastbootWrite::Flash {
+            serial,
+            slot,
+            partition,
+            ..
+        })) = step
+        {
+            if *partition != Partition::Vbmeta {
+                return Some((serial.as_str().to_string(), *slot, *partition));
+            }
+        }
+    }
+    None
 }
 
 fn g16(rendered: &[String], tables: &SafetyTables) -> (bool, String) {
@@ -799,7 +1057,7 @@ pub fn spl_from_build(build: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::cmd::{AdbHostWrite, DeviceSerial, FastbootWrite, ImageRef, RebootMode, WriteCmd};
-    use crate::safety::backup::InitBootRecord;
+    use crate::safety::backup::BackupSet;
     use crate::safety::tables::{ported_items, tables};
     use crate::wizard::PlanStep;
 
@@ -825,9 +1083,12 @@ mod tests {
     }
 
     fn verified() -> BackupState {
-        BackupState::Verified(InitBootRecord::from_bytes(
-            Slot::A,
-            b"stock-init-boot".to_vec(),
+        BackupState::Verified(BackupSet::bound(
+            "set-komodo",
+            "manifest",
+            "synth-komodo-1",
+            Slot::B,
+            Partition::InitBoot,
         ))
     }
 
@@ -875,12 +1136,24 @@ mod tests {
     }
 
     #[test]
-    fn reboot_without_facts_would_run() {
+    fn reboot_without_facts_blocks_the_device_and_the_tools() {
         let steps = vec![PlanStep::Write(WriteCmd::AdbHost(AdbHostWrite::Reboot {
             serial: serial(),
             mode: RebootMode::System,
         }))];
         let lines = preview(&steps, None, None);
+        for id in ["G02", "G21", "G22"] {
+            assert_blocked(&lines, id);
+        }
+    }
+
+    #[test]
+    fn observed_reboot_would_run() {
+        let steps = vec![PlanStep::Write(WriteCmd::AdbHost(AdbHostWrite::Reboot {
+            serial: serial(),
+            mode: RebootMode::System,
+        }))];
+        let lines = preview(&steps, Some(&SafetyFacts::komodo_ready()), None);
         assert_eq!(
             lines,
             vec!["WOULD RUN: -s synth-komodo-1 reboot".to_string()]
@@ -963,6 +1236,7 @@ mod tests {
 
         let mut facts = SafetyFacts::komodo_ready();
         facts.device_codename = "oriole".into();
+        facts.plan_device = "oriole".into();
         facts.firmware_codename = "oriole".into();
         facts.firmware_filename = "oriole-factory-synthetic.zip".into();
         facts.target_partition = Partition::Boot;
@@ -973,6 +1247,7 @@ mod tests {
 
         let mut facts = SafetyFacts::komodo_ready();
         facts.device_codename = "shiba".into();
+        facts.plan_device = "shiba".into();
         facts.firmware_codename = "shiba".into();
         facts.firmware_filename = "shiba-factory-synthetic.zip".into();
         facts.bootloader_a = None;
@@ -980,6 +1255,7 @@ mod tests {
 
         let mut facts = SafetyFacts::komodo_ready();
         facts.device_codename = "oriole".into();
+        facts.plan_device = "oriole".into();
         facts.firmware_codename = "oriole".into();
         facts.firmware_filename = "oriole-factory-synthetic.zip".into();
         facts.target_partition = Partition::Boot;
@@ -1082,6 +1358,135 @@ mod tests {
     }
 
     #[test]
+    fn missing_patch_fingerprint_and_magisk_fail_closed() {
+        let backup = verified();
+        let steps = stock_flash();
+        let mut facts = SafetyFacts::komodo_ready();
+        facts.firmware_timestamp = None;
+        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G07");
+
+        let mut facts = SafetyFacts::komodo_ready();
+        facts.image_fingerprint = None;
+        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G08");
+
+        let mut facts = SafetyFacts::komodo_ready();
+        facts.magisk_package = None;
+        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G10");
+
+        let mut facts = SafetyFacts::komodo_ready();
+        facts.kernel = None;
+        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G10");
+    }
+
+    #[test]
+    fn g04_compares_firmware_with_the_plan_device() {
+        let mut facts = SafetyFacts::komodo_ready();
+        facts.plan_device = "shiba".into();
+        facts.device_codename = "komodo".into();
+        facts.firmware_codename = "komodo".into();
+        facts.firmware_filename = "komodo-factory-synthetic.zip".into();
+        let lines = preview(&stock_flash(), Some(&facts), Some(&verified()));
+        assert_blocked(&lines, "G04");
+        assert!(lines.iter().any(|line| line.contains("shiba")));
+    }
+
+    #[test]
+    fn g19_is_acknowledged_and_g20_is_a_block() {
+        let mut facts = SafetyFacts::komodo_ready();
+        facts.device_codename = "oriole".into();
+        facts.plan_device = "oriole".into();
+        facts.firmware_codename = "oriole".into();
+        facts.firmware_filename = "oriole-factory-synthetic.zip".into();
+        facts.target_partition = Partition::Boot;
+        facts.bootloader_a = Some("15.3-13239611".into());
+        let steps = vec![flash(Slot::B, Partition::Boot, "/var/flashwright/boot.img")];
+        let backup = BackupState::Verified(BackupSet::bound(
+            "set-oriole",
+            "manifest",
+            "synth-komodo-1",
+            Slot::B,
+            Partition::Boot,
+        ));
+        let open = evaluate(&steps, Some(&facts), Some(&backup));
+        let g19 = open.iter().find(|gate| gate.id == "G19").unwrap();
+        assert_eq!(g19.severity, Severity::Ack);
+        assert!(g19.blocked);
+        let acked = evaluate_acked(&steps, Some(&facts), Some(&backup), &["G19".into()]);
+        assert!(!acked.iter().find(|gate| gate.id == "G19").unwrap().blocked);
+
+        let mut facts = SafetyFacts::komodo_ready();
+        facts.pending_ota = Some(true);
+        let blocked = evaluate(&stock_flash(), Some(&facts), Some(&verified()));
+        let g20 = blocked.iter().find(|gate| gate.id == "G20").unwrap();
+        assert_eq!(g20.severity, Severity::Block);
+        assert!(g20.blocked);
+        let still = evaluate_acked(
+            &stock_flash(),
+            Some(&facts),
+            Some(&verified()),
+            &["G20".into()],
+        );
+        assert!(still.iter().find(|gate| gate.id == "G20").unwrap().blocked);
+    }
+
+    #[test]
+    fn a_backup_for_another_slot_does_not_satisfy_g14() {
+        let backup = BackupState::Verified(BackupSet::bound(
+            "set-a",
+            "manifest",
+            "synth-komodo-1",
+            Slot::A,
+            Partition::InitBoot,
+        ));
+        assert_blocked(
+            &preview(
+                &stock_flash(),
+                Some(&SafetyFacts::komodo_ready()),
+                Some(&backup),
+            ),
+            "G14",
+        );
+    }
+
+    #[test]
+    fn step_gates_fail_closed_when_the_phone_changes() {
+        let step = flash(
+            Slot::B,
+            Partition::InitBoot,
+            "/var/flashwright/init_boot.img",
+        );
+        let mut facts = SafetyFacts::komodo_ready();
+        assert!(pre_step_blocks(&step, Some(&facts)).is_empty());
+        facts.unlocked = Some(false);
+        assert!(pre_step_blocks(&step, Some(&facts))
+            .iter()
+            .any(|gate| gate.id == "G03"));
+        facts.unlocked = Some(true);
+        facts.partition_bytes = Some(10);
+        assert!(pre_step_blocks(&step, Some(&facts))
+            .iter()
+            .any(|gate| gate.id == "G15"));
+        facts.partition_bytes = None;
+        assert!(pre_step_blocks(&step, Some(&facts))
+            .iter()
+            .any(|gate| gate.id == "G15"));
+        let reboot = PlanStep::Write(WriteCmd::AdbHost(AdbHostWrite::Reboot {
+            serial: serial(),
+            mode: RebootMode::System,
+        }));
+        facts = SafetyFacts::komodo_ready();
+        facts.tools_verified = false;
+        assert!(pre_step_blocks(&reboot, Some(&facts))
+            .iter()
+            .any(|gate| gate.id == "G21"));
+        facts.tools_verified = true;
+        facts.adb_server_ok = false;
+        assert!(pre_step_blocks(&reboot, Some(&facts))
+            .iter()
+            .any(|gate| gate.id == "G22"));
+    }
+
+    #[test]
     fn bootloader_compare_and_spl_follow_the_ported_rules() {
         assert!(!bootloader_older("15.3-13239612", "15.3-13239612"));
         assert!(bootloader_older("15.3-13239611", "15.3-13239612"));
@@ -1108,6 +1513,18 @@ mod tests {
             .unwrap();
         assert!(komodo.has_init_boot);
         assert!(komodo.ab);
+        let angler = loaded
+            .devices
+            .iter()
+            .find(|row| row.codename == "angler")
+            .unwrap();
+        assert!(!angler.ab, "Nexus 6P is not an A/B device");
+        let ryu = loaded
+            .devices
+            .iter()
+            .find(|row| row.codename == "ryu")
+            .unwrap();
+        assert!(!ryu.ab, "Pixel C is not an A/B device");
         assert_eq!(komodo.bootloader_codename, "ripcurrentpro");
         assert!(loaded
             .combos

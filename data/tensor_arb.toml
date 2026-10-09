@@ -1,5 +1,5 @@
 # Tensor phones whose Android 13 bootloader bumps anti-rollback.
-# Ported from PixelFlasher pf_modules.py at commit 081286d, lines 6322-6327.
+# Ported from PixelFlasher pf_modules.py at commit 081286d, lines 6322-6367.
 # A bootloader write while the phone is still below the listed API level is a
 # block, because this product does not write both slots.
 

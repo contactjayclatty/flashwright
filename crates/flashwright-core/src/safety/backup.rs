@@ -1,178 +1,292 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Clatty Works
 
-//! Stock init_boot backup.
+//! Stock backup of both slots of the boot image and of vbmeta.
 //!
-//! The bytes come from the typed read catalogue (`exec-out` of `cat` on the
-//! block device). They are stored with a SHA-256, compared to the factory
-//! image, and compared again to a second read.
+//! Each partition is hashed on the phone, then read. The host hash must equal
+//! the phone hash. A truncated read is not a complete backup. Bytes are written
+//! under a partial directory and renamed into place with a manifest.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
+use sha1::{Digest as Sha1Digest, Sha1};
+use sha2::Sha256;
 
-use crate::cmd::{ByNameRoot, DeviceSerial, ExecOutSuRead, ReadCmd};
+use crate::cmd::{ByNameRoot, DeviceSerial, ExecOutSuRead, ReadCmd, SuRead};
 use crate::device::{Partition, PlatformToolsTransport, Slot};
 use crate::proc::CommandRunner;
 
 use super::evaluate::GateBlock;
 
-/// Factory `init_boot` bytes. The image extractor implements this.
-pub trait FactoryInitBoot {
-    fn codename(&self) -> &str;
-    fn init_boot(&self) -> &[u8];
-}
+const SCHEMA: &str = "flashwright.backup/1";
 
-/// In-memory factory image for tests and for a caller that already holds the bytes.
-#[derive(Clone, Debug)]
-pub struct BytesInitBoot {
-    pub codename: String,
-    pub bytes: Vec<u8>,
-}
-
-impl FactoryInitBoot for BytesInitBoot {
-    fn codename(&self) -> &str {
-        &self.codename
-    }
-
-    fn init_boot(&self) -> &[u8] {
-        &self.bytes
-    }
-}
-
-/// A stored stock image. The bytes stay private so a later check uses [`Self::matches`].
+/// A verified backup set bound to one phone, slot, and partition.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InitBootRecord {
+pub struct BackupSet {
+    pub set_id: String,
+    pub manifest_sha256: String,
+    pub serial_sha256: String,
     pub slot: Slot,
-    pub sha256: String,
-    pub len: usize,
-    bytes: Vec<u8>,
+    pub partition: Partition,
+    pub dir: PathBuf,
 }
 
-impl InitBootRecord {
-    pub fn from_bytes(slot: Slot, bytes: Vec<u8>) -> Self {
-        let sha256 = sha256_hex(&bytes);
-        let len = bytes.len();
+impl BackupSet {
+    #[cfg(test)]
+    pub(crate) fn bound(
+        set_id: impl Into<String>,
+        manifest_sha256: impl Into<String>,
+        serial: &str,
+        slot: Slot,
+        partition: Partition,
+    ) -> Self {
         Self {
+            set_id: set_id.into(),
+            manifest_sha256: manifest_sha256.into(),
+            serial_sha256: sha256_hex(serial.as_bytes()),
             slot,
-            sha256,
-            len,
-            bytes,
+            partition,
+            dir: PathBuf::new(),
         }
     }
 
-    pub fn matches(&self, other: &[u8]) -> bool {
-        self.bytes == other && sha256_hex(&self.bytes) == self.sha256
-    }
-
-    /// Write the image and a `sha256sum` line next to it.
-    pub fn write_to(&self, dir: &Path) -> Result<PathBuf, String> {
-        fs::create_dir_all(dir).map_err(|err| err.to_string())?;
-        let name = format!("init_boot_{}.img", self.slot.as_str());
-        let path = dir.join(&name);
-        fs::write(&path, &self.bytes).map_err(|err| err.to_string())?;
-        let sum = dir.join(format!("{name}.sha256"));
-        fs::write(&sum, format!("{}  {name}\n", self.sha256)).map_err(|err| err.to_string())?;
-        let read_back = fs::read(&path).map_err(|err| err.to_string())?;
-        if read_back != self.bytes {
-            return Err("stored init_boot does not match the bytes just written".into());
-        }
-        Ok(path)
+    pub fn matches_plan(&self, serial: &str, slot: Slot, partition: Partition) -> bool {
+        !self.set_id.is_empty()
+            && !self.manifest_sha256.is_empty()
+            && self.serial_sha256 == sha256_hex(serial.as_bytes())
+            && self.slot == slot
+            && self.partition == partition
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BackupState {
-    Verified(InitBootRecord),
+    Verified(BackupSet),
     Blocked(GateBlock),
 }
 
-pub async fn pull_stock_init_boot<R: CommandRunner>(
+#[derive(serde::Serialize)]
+struct ManifestItem {
+    partition: String,
+    slot: String,
+    file: String,
+    size: u64,
+    sha256: String,
+    sha1: String,
+    device_sha256: String,
+    source: &'static str,
+}
+
+#[derive(serde::Serialize)]
+struct ManifestFile {
+    schema: &'static str,
+    set_id: String,
+    serial_sha256: String,
+    items: Vec<ManifestItem>,
+}
+
+struct Captured {
+    partition: Partition,
+    slot: Slot,
+    bytes: Vec<u8>,
+    sha256: String,
+    sha1: String,
+    device_sha256: String,
+}
+
+/// Read both slots of `partition` and of vbmeta. Compare each read with the phone's own SHA-256.
+pub async fn capture_stock<R: CommandRunner>(
     transport: &PlatformToolsTransport<R>,
     serial: &DeviceSerial,
     slot: Slot,
-    expected_codename: &str,
-    factory: &dyn FactoryInitBoot,
-) -> Result<InitBootRecord, GateBlock> {
-    if !same_device(expected_codename, factory.codename()) {
-        return Err(block(
-            "G04",
-            format!(
-                "The factory image is for {}, and this phone is {expected_codename}.",
-                factory.codename()
-            ),
-        ));
-    }
-    let first = pull(transport, serial, slot).await?;
-    let factory_bytes = factory.init_boot();
-    if first != factory_bytes {
+    partition: Partition,
+    dest: &Path,
+) -> Result<BackupSet, GateBlock> {
+    if partition == Partition::Vbmeta {
         return Err(block(
             "G14",
-            "The init_boot read from the phone does not match the factory image.",
+            "vbmeta is read with the boot image, not alone.",
         ));
     }
-    let record = InitBootRecord {
-        slot,
-        sha256: sha256_hex(&first),
-        len: first.len(),
-        bytes: first,
-    };
-    if !record.matches(factory_bytes) {
-        return Err(block(
-            "G14",
-            "The stored init_boot hash does not match the factory image.",
-        ));
+    let mut captured = Vec::new();
+    for part in [partition, Partition::Vbmeta] {
+        for part_slot in [Slot::A, Slot::B] {
+            captured.push(capture_one(transport, serial, part, part_slot).await?);
+        }
     }
-    let second = pull(transport, serial, slot).await?;
-    if !record.matches(&second) {
-        return Err(block(
-            "G14",
-            "Reading init_boot again did not match the stored backup.",
-        ));
-    }
-    Ok(record)
+    write_set(serial, slot, partition, dest, captured)
 }
 
-fn same_device(expected: &str, factory: &str) -> bool {
-    let tables = super::tables::tables();
-    tables.aliases.canonical(expected) == tables.aliases.canonical(factory)
-}
-
-async fn pull<R: CommandRunner>(
+async fn capture_one<R: CommandRunner>(
     transport: &PlatformToolsTransport<R>,
     serial: &DeviceSerial,
+    partition: Partition,
     slot: Slot,
-) -> Result<Vec<u8>, GateBlock> {
+) -> Result<Captured, GateBlock> {
+    let device_sha = device_sha256(transport, serial, partition, slot).await?;
     let cmd = ReadCmd::ExecOutSu(ExecOutSuRead::CatBlock {
         serial: serial.clone(),
         root: ByNameRoot::ByName,
-        partition: Partition::InitBoot,
+        partition,
         slot,
     });
     let result = transport
         .run_read(cmd)
         .await
-        .map_err(|err| block("G14", format!("The init_boot read failed: {err}")))?;
+        .map_err(|err| block("G14", format!("The {partition} read failed: {err}")))?;
+    if result.stdout_truncated {
+        return Err(block("G14", format!("The {partition} read was truncated.")));
+    }
     if !result.success_exit() {
         return Err(block(
             "G14",
-            "The init_boot read did not finish successfully.",
+            format!("The {partition} read did not finish successfully."),
         ));
     }
     if result.stdout.is_empty() {
-        return Err(block("G14", "The init_boot read was empty."));
+        return Err(block("G14", format!("The {partition} read was empty.")));
     }
-    Ok(result.stdout)
+    let sha256 = sha256_hex(&result.stdout);
+    if sha256 != device_sha {
+        return Err(block(
+            "G14",
+            format!("The {partition} read does not match the phone's SHA-256."),
+        ));
+    }
+    Ok(Captured {
+        partition,
+        slot,
+        sha1: sha1_hex(&result.stdout),
+        sha256,
+        device_sha256: device_sha,
+        bytes: result.stdout,
+    })
+}
+
+async fn device_sha256<R: CommandRunner>(
+    transport: &PlatformToolsTransport<R>,
+    serial: &DeviceSerial,
+    partition: Partition,
+    slot: Slot,
+) -> Result<String, GateBlock> {
+    let cmd = ReadCmd::Su(SuRead::Sha256Block {
+        serial: serial.clone(),
+        root: ByNameRoot::ByName,
+        partition,
+        slot,
+    });
+    let result = transport
+        .run_read(cmd)
+        .await
+        .map_err(|err| block("G14", format!("The phone SHA-256 read failed: {err}")))?;
+    if result.stdout_truncated || !result.success_exit() {
+        return Err(block(
+            "G14",
+            "The phone SHA-256 read was truncated or failed.",
+        ));
+    }
+    parse_sha256(&result.stdout_text()).ok_or_else(|| {
+        block(
+            "G14",
+            "The phone did not return a SHA-256 for the partition.",
+        )
+    })
+}
+
+fn write_set(
+    serial: &DeviceSerial,
+    slot: Slot,
+    partition: Partition,
+    dest: &Path,
+    captured: Vec<Captured>,
+) -> Result<BackupSet, GateBlock> {
+    let serial_sha256 = sha256_hex(serial.as_str().as_bytes());
+    let set_id = sha256_hex(
+        format!(
+            "{serial_sha256}:{}:{}:{}",
+            slot.as_str(),
+            partition.fastboot_name(),
+            captured.len()
+        )
+        .as_bytes(),
+    );
+    let partial = dest.join(format!("{set_id}.partial"));
+    if partial.exists() {
+        fs::remove_dir_all(&partial).map_err(|err| block("G14", err.to_string()))?;
+    }
+    fs::create_dir_all(&partial).map_err(|err| block("G14", err.to_string()))?;
+    let mut items = Vec::new();
+    let mut sums = String::new();
+    for item in &captured {
+        let file = format!(
+            "{}_{}.img",
+            item.partition.fastboot_name(),
+            item.slot.as_str()
+        );
+        fs::write(partial.join(&file), &item.bytes).map_err(|err| block("G14", err.to_string()))?;
+        sums.push_str(&format!("{}  {file}\n", item.sha256));
+        items.push(ManifestItem {
+            partition: item.partition.fastboot_name().to_string(),
+            slot: item.slot.as_str().to_string(),
+            file,
+            size: item.bytes.len() as u64,
+            sha256: item.sha256.clone(),
+            sha1: item.sha1.clone(),
+            device_sha256: item.device_sha256.clone(),
+            source: "device-root-read",
+        });
+    }
+    fs::write(partial.join("SHA256SUMS"), &sums).map_err(|err| block("G14", err.to_string()))?;
+    let manifest = ManifestFile {
+        schema: SCHEMA,
+        set_id: set_id.clone(),
+        serial_sha256: serial_sha256.clone(),
+        items,
+    };
+    let body = serde_json::to_vec_pretty(&manifest).map_err(|err| block("G14", err.to_string()))?;
+    fs::write(partial.join("manifest.json"), &body).map_err(|err| block("G14", err.to_string()))?;
+    let final_dir = dest.join(&set_id);
+    if final_dir.exists() {
+        fs::remove_dir_all(&final_dir).map_err(|err| block("G14", err.to_string()))?;
+    }
+    fs::rename(&partial, &final_dir).map_err(|err| block("G14", err.to_string()))?;
+    Ok(BackupSet {
+        set_id,
+        manifest_sha256: sha256_hex(&body),
+        serial_sha256,
+        slot,
+        partition,
+        dir: final_dir,
+    })
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        hex.push_str(&format!("{byte:02x}"));
+    hex(Sha256::digest(bytes))
+}
+
+fn sha1_hex(bytes: &[u8]) -> String {
+    hex(Sha1::digest(bytes))
+}
+
+fn hex(bytes: impl AsRef<[u8]>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = bytes.as_ref();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0xf) as usize] as char);
     }
-    hex
+    out
+}
+
+fn parse_sha256(text: &str) -> Option<String> {
+    let token = text.split_whitespace().next()?.trim();
+    if token.len() == 64 && token.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(token.to_ascii_lowercase())
+    } else {
+        None
+    }
 }
 
 fn block(id: &'static str, reason: impl Into<String>) -> GateBlock {
@@ -225,97 +339,89 @@ mod tests {
         )
     }
 
-    fn factory(bytes: &[u8]) -> BytesInitBoot {
-        BytesInitBoot {
-            codename: "komodo".into(),
-            bytes: bytes.to_vec(),
+    fn rooted_bytes(partition: Partition, slot: Slot) -> Vec<u8> {
+        format!("rooted-{}-{}", partition.fastboot_name(), slot.as_str()).into_bytes()
+    }
+
+    fn answer(call: &crate::proc::Invocation) -> ScriptedResponse {
+        let joined = call.args.join(" ");
+        let partition = if joined.contains("vbmeta") {
+            Partition::Vbmeta
+        } else {
+            Partition::InitBoot
+        };
+        let slot = if joined.contains("_b") {
+            Slot::B
+        } else {
+            Slot::A
+        };
+        let bytes = rooted_bytes(partition, slot);
+        if joined.contains("sha256sum") {
+            ScriptedResponse::ok(format!("{}  block\n", sha256_hex(&bytes)))
+        } else {
+            ScriptedResponse::ok(bytes)
         }
     }
 
     #[tokio::test]
-    async fn stock_init_boot_matches_the_factory_image_and_a_second_read() {
-        let stock = b"synthetic-komodo-init-boot".to_vec();
+    async fn rooted_phone_matches_its_own_sha_and_writes_both_slots() {
         let runner = Arc::new(ScriptedRunner::new());
-        let seen = stock.clone();
-        runner.on_fn(
-            adb_name(),
-            &["-s", "synth-komodo-1", "exec-out"],
-            move |_call, _hit| ScriptedResponse::ok(seen.clone()),
-        );
+        runner.on_fn(adb_name(), &["-s", "synth-komodo-1"], |call, _hit| {
+            answer(call)
+        });
         let transport = scripted(Arc::clone(&runner));
-        let record =
-            pull_stock_init_boot(&transport, &serial(), Slot::A, "komodo", &factory(&stock))
-                .await
-                .unwrap();
-        assert_eq!(record.len, stock.len());
-        assert_eq!(record.sha256, sha256_hex(&stock));
-        assert_eq!(record.sha256.len(), 64);
-        assert!(record.matches(&stock));
-        assert_eq!(runner.calls().len(), 2);
-        assert!(runner.calls().iter().all(|call| {
-            call.args.first().is_some_and(|arg| arg == "-s")
-                && call.args.get(2).is_some_and(|arg| arg == "exec-out")
-                && !call.args.iter().any(|arg| arg == "flash")
-        }));
-
-        let dir = std::env::temp_dir().join(format!("flashwright-init-boot-{}", record.sha256));
-        let path = record.write_to(&dir).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), stock);
-        let sum = std::fs::read_to_string(dir.join("init_boot_a.img.sha256")).unwrap();
-        assert_eq!(sum, format!("{}  init_boot_a.img\n", record.sha256));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dest = std::env::temp_dir().join(format!("flashwright-backup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dest);
+        let set = capture_stock(&transport, &serial(), Slot::B, Partition::InitBoot, &dest)
+            .await
+            .unwrap();
+        assert!(set.matches_plan("synth-komodo-1", Slot::B, Partition::InitBoot));
+        assert!(!set.matches_plan("other-phone", Slot::B, Partition::InitBoot));
+        assert!(!set.matches_plan("synth-komodo-1", Slot::A, Partition::InitBoot));
+        assert!(!set.matches_plan("synth-komodo-1", Slot::B, Partition::Boot));
+        let manifest = fs::read_to_string(set.dir.join("manifest.json")).unwrap();
+        assert!(manifest.contains("flashwright.backup/1"));
+        assert!(manifest.contains(&set.serial_sha256));
+        assert!(!manifest.contains("synth-komodo-1"));
+        for name in [
+            "init_boot_a.img",
+            "init_boot_b.img",
+            "vbmeta_a.img",
+            "vbmeta_b.img",
+        ] {
+            assert!(set.dir.join(name).is_file(), "{name}");
+        }
+        assert!(set.dir.join("SHA256SUMS").is_file());
+        assert!(!dest.join(format!("{}.partial", set.set_id)).exists());
+        let cat = runner
+            .calls()
+            .into_iter()
+            .find(|call| call.args.iter().any(|arg| arg.contains("cat")))
+            .unwrap();
+        assert!(cat.timeout.as_secs() >= 60);
+        assert!(cat.watchdog.is_some_and(|wait| wait.as_secs() >= 60));
+        let _ = fs::remove_dir_all(&dest);
     }
 
     #[tokio::test]
-    async fn a_factory_or_reread_mismatch_blocks_before_anything_is_stored() {
-        let stock = b"synthetic-komodo-init-boot".to_vec();
+    async fn a_truncated_or_mismatched_read_blocks() {
         let runner = Arc::new(ScriptedRunner::new());
-        runner.on(
-            adb_name(),
-            &["-s", "synth-komodo-1", "exec-out"],
-            ScriptedResponse::ok(stock.clone()),
-        );
-        let transport = scripted(Arc::clone(&runner));
-        let mut other = stock.clone();
-        other[0] = other[0].wrapping_add(1);
-        let err = pull_stock_init_boot(&transport, &serial(), Slot::A, "komodo", &factory(&other))
-            .await
-            .unwrap_err();
-        assert_eq!(err.id, "G14");
-        assert!(err.reason.contains("factory"));
-        assert_eq!(runner.calls().len(), 1);
-
-        let wrong = BytesInitBoot {
-            codename: "shiba".into(),
-            bytes: stock.clone(),
-        };
-        let before = runner.calls().len();
-        let err = pull_stock_init_boot(&transport, &serial(), Slot::A, "komodo", &wrong)
-            .await
-            .unwrap_err();
-        assert_eq!(err.id, "G04");
-        assert_eq!(runner.calls().len(), before);
-
-        let first = stock.clone();
-        let second = other.clone();
-        let runner = Arc::new(ScriptedRunner::new());
-        runner.on_fn(
-            adb_name(),
-            &["-s", "synth-komodo-1", "exec-out"],
-            move |_call, hit| {
-                let bytes = if hit == 0 {
-                    first.clone()
-                } else {
-                    second.clone()
-                };
-                ScriptedResponse::ok(bytes)
-            },
-        );
+        runner.on_fn(adb_name(), &["-s", "synth-komodo-1"], |call, _hit| {
+            let joined = call.args.join(" ");
+            if joined.contains("sha256sum") {
+                ScriptedResponse::ok(format!("{}  block\n", "ab".repeat(32)))
+            } else {
+                ScriptedResponse::ok(b"short".to_vec()).truncated()
+            }
+        });
         let transport = scripted(runner);
-        let err = pull_stock_init_boot(&transport, &serial(), Slot::A, "komodo", &factory(&stock))
+        let dest =
+            std::env::temp_dir().join(format!("flashwright-backup-trunc-{}", std::process::id()));
+        let err = capture_stock(&transport, &serial(), Slot::A, Partition::InitBoot, &dest)
             .await
             .unwrap_err();
         assert_eq!(err.id, "G14");
-        assert!(err.reason.contains("again"));
+        assert!(err.reason.contains("truncated"));
+        let _ = fs::remove_dir_all(&dest);
     }
 }

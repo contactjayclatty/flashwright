@@ -1,7 +1,8 @@
 # Device and build compatibility.
 # Ported from PixelFlasher android_devices.json at commit 081286d.
 # Codename, model, support dates, first API level, bootloader codename,
-# init_boot, and whether the device is a watch. Every row is A/B.
+# init_boot, and whether the device is a watch.
+# angler (Nexus 6P) and ryu (Pixel C) are not A/B. Later phones are.
 # Values are the public device table. No serials or build fingerprints.
 
 [[device]]
@@ -24,7 +25,7 @@ first_api_level = 23
 bootloader_codename = "angler"
 has_init_boot = false
 is_pixel_watch = false
-ab = true
+ab = false
 
 [[device]]
 codename = "aurora"
@@ -398,7 +399,7 @@ first_api_level = 23
 bootloader_codename = "ryu"
 has_init_boot = false
 is_pixel_watch = false
-ab = true
+ab = false
 
 [[device]]
 codename = "sailfish"
