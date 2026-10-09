@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Clatty Works
 
-use flashwright_proc::ProcError;
+use crate::proc::ProcError;
 use thiserror::Error;
 
 /// Device-layer failures. Messages name the condition the caller can act on.

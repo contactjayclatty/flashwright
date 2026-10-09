@@ -1,0 +1,4 @@
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "spawn only through flashwright_core::proc::spawn::command" },
+    { path = "tokio::process::Command::new", reason = "spawn only through flashwright_core::proc::spawn::command" },
+]

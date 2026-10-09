@@ -102,17 +102,19 @@ async fn t1_3_adb_props_match_fixtures() {
     let getprop = runner
         .calls()
         .into_iter()
-        .find(|call| call.args == ["-s", "dib123", "shell", "getprop"])
+        .find(|call| call.args == ["-s", "dib123", "shell", "'getprop'"])
         .expect("getprop");
     assert!(getprop.args.iter().all(|arg| arg != "su"));
     assert_eq!(getprop.timeout, Duration::from_secs(10));
     let su = runner
         .calls()
         .into_iter()
-        .find(|call| call.args.len() >= 5 && call.args[2] == "shell" && call.args[3] == "su")
+        .find(|call| {
+            call.args.len() >= 4 && call.args[2] == "shell" && call.args[3].contains("'su'")
+        })
         .expect("su");
     assert_eq!(su.timeout, Duration::from_secs(5));
-    assert_eq!(su.args, ["-s", "dib123", "shell", "su", "-c", "id"]);
+    assert_eq!(su.args, ["-s", "dib123", "shell", "'su' '-c' 'id'"]);
 }
 
 #[tokio::test]

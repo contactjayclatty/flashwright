@@ -1,0 +1,24 @@
+error[E0624]: method `run_write` is private
+  --> tests/compile_fail/run_write_external.rs:11:29
+   |
+11 |       let _result = transport.run_write(loop {}, loop {});
+   |                               ^^^^^^^^^ private method
+   |
+  ::: src/device/transport.rs
+   |
+   | /     pub(crate) async fn run_write(
+   | |         &self,
+   | |         token: &WriteToken,
+   | |         cmd: crate::cmd::WriteCmd,
+   | |     ) -> Result<RunResult, DeviceError> {
+   | |_______________________________________- private method defined here
+
+warning: unreachable expression
+  --> tests/compile_fail/run_write_external.rs:11:48
+   |
+11 |     let _result = transport.run_write(loop {}, loop {});
+   |                                       -------  ^^^^^^^ unreachable expression
+   |                                       |
+   |                                       any code following this expression is unreachable
+   |
+   = note: `#[warn(unreachable_code)]` on by default

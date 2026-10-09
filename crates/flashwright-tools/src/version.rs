@@ -67,6 +67,20 @@ pub fn parse_adb_version_output(text: &str) -> Result<SdkVersion, ToolsError> {
     })
 }
 
+/// Read the SDK version from `fastboot --version` output.
+pub fn parse_fastboot_version_output(text: &str) -> Result<SdkVersion, ToolsError> {
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("fastboot version ") {
+            let token = rest.split_whitespace().next().unwrap_or(rest);
+            return SdkVersion::parse(token);
+        }
+    }
+    Err(ToolsError::Version {
+        detail: "fastboot version output has no version line".into(),
+    })
+}
+
 fn take_number(part: Option<&str>) -> Result<u64, ToolsError> {
     let Some(part) = part else {
         return Err(ToolsError::Version {

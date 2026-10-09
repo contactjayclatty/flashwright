@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Clatty Works
 
-use flashwright_proc::ProcError;
 use thiserror::Error;
 
 /// Platform-tools discovery and import failures.
@@ -34,9 +33,6 @@ pub enum ToolsError {
 
     #[error("platform-tools policy is invalid: {0}")]
     Policy(String),
-
-    #[error(transparent)]
-    Process(#[from] ProcError),
 
     #[error("zip error: {0}")]
     Zip(String),

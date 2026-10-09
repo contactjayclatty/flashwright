@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::lines::{push_capped, tail_of, LineAssembler};
-use crate::{file_name_lower, CommandRunner, Invocation, ProcError, RunResult, StdStream};
+use crate::proc::lines::{push_capped, tail_of, LineAssembler};
+use crate::proc::{file_name_lower, CommandRunner, Invocation, ProcError, RunResult, StdStream};
 
 /// Canned output for one matching invocation.
 #[derive(Clone, Debug)]

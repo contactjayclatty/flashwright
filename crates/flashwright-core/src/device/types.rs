@@ -84,6 +84,7 @@ pub enum Mode {
     Fastboot,
     Fastbootd,
     Unauthorized,
+    Authorizing,
     NoPermissions,
     Offline,
     Unrecognized,
@@ -99,6 +100,7 @@ impl Mode {
             Self::Fastboot => "fastboot",
             Self::Fastbootd => "fastbootd",
             Self::Unauthorized => "unauthorized",
+            Self::Authorizing => "authorizing",
             Self::NoPermissions => "no permissions",
             Self::Offline => "offline",
             Self::Unrecognized => "unrecognized",
@@ -111,7 +113,7 @@ impl Mode {
 
     pub fn guidance(self) -> Option<&'static str> {
         match self {
-            Self::Unauthorized => Some(
+            Self::Unauthorized | Self::Authorizing => Some(
                 "This phone is unauthorised. Unlock it and tap Allow on the USB debugging prompt, then scan again.",
             ),
             Self::Offline => Some("This phone is offline. Reconnect the cable and scan again."),
@@ -200,29 +202,14 @@ pub struct DeviceInfo {
 
 impl DeviceInfo {
     /// The other slot. A missing active slot is an error, never slot A.
-    pub fn inactive_slot(&self) -> Result<Slot, crate::DeviceError> {
+    pub fn inactive_slot(&self) -> Result<Slot, crate::device::DeviceError> {
         self.active_slot
             .map(Slot::other)
-            .ok_or(crate::DeviceError::UnknownSlot)
+            .ok_or(crate::device::DeviceError::UnknownSlot)
     }
 }
 
-/// Capability for write-class calls.
-///
-/// `mint` is public so tests can exercise write argv. Phase 1 plans are the
-/// only production caller; `xtask` rejects other call sites.
-#[derive(Debug)]
-pub struct WriteToken {
-    _private: (),
-}
-
-impl WriteToken {
-    pub fn mint() -> Self {
-        Self { _private: () }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RebootTarget {
     Bootloader,
     Sideload,

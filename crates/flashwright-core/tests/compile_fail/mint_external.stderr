@@ -1,0 +1,20 @@
+error[E0624]: associated function `mint` is private
+ --> tests/compile_fail/mint_external.rs:2:48
+  |
+2 |     let _token = flashwright_core::WriteToken::mint(loop {}, loop {});
+  |                                                ^^^^ private associated function
+  |
+ ::: src/token.rs
+  |
+  |     pub(crate) fn mint(plan: &ConfirmedPlan, run_id: RunId) -> Self {
+  |     --------------------------------------------------------------- private associated function defined here
+
+warning: unreachable expression
+ --> tests/compile_fail/mint_external.rs:2:62
+  |
+2 |     let _token = flashwright_core::WriteToken::mint(loop {}, loop {});
+  |                                                     -------  ^^^^^^^ unreachable expression
+  |                                                     |
+  |                                                     any code following this expression is unreachable
+  |
+  = note: `#[warn(unreachable_code)]` on by default

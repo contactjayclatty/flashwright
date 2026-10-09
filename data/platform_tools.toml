@@ -1,11 +1,10 @@
 # Platform-tools allow/block list. Compiled into flashwright-tools.
-# Block: refuse the tools, including for a scan (spec §3.2).
-# Allow: required before any plan that writes. An entry is write-enabled
-# only after an M1 device test records the per-file SHA-256s.
-# 37.0.1 is a candidate. Its zip SHA-1 is the checksum Google publishes for
-# platform-tools_r37.0.1-win.zip in repository2-3.xml (read 9 Oct 2026).
-# Per-file SHA-256s are not invented here. device_tested stays false until
-# a real device run records them, so this candidate cannot unlock writes.
+# Block: refuse the tools, including for a scan.
+# Allow: required before any plan that writes. An entry stays scan-only
+# until a device test records the per-file SHA-256s and sets device_tested.
+# 37.0.1 is the only allow-list entry. Its zip SHA-1 is the checksum Google
+# publishes for platform-tools_r37.0.1-win.zip. Per-file SHA-256s are empty
+# until that device test, so writes stay off.
 
 [block]
 below = "33.0.3"
@@ -18,11 +17,10 @@ to = "34.0.4"
 version = "36.0.2"
 any_build = true
 
-allow = []
-
-[[candidate]]
+[[allow]]
 version = "37.0.1"
 zip_sha1 = "e03e78b1d80b396f1c3358e31251cb31740e1110"
 device_tested = false
 adb_sha256 = ""
 fastboot_sha256 = ""
+parser_profile = "pt-37"

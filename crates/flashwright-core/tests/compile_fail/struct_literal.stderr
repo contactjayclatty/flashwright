@@ -1,0 +1,13 @@
+error[E0451]: fields `plan_hash`, `serial`, `run_id` and `marker` of struct `WriteToken` are private
+ --> tests/compile_fail/struct_literal.rs:3:9
+  |
+2 |     let _token = flashwright_core::WriteToken {
+  |                  ---------------------------- in this type
+3 |         plan_hash: String::new(),
+  |         ^^^^^^^^^ private field
+4 |         serial: String::new(),
+  |         ^^^^^^ private field
+5 |         run_id: 0,
+  |         ^^^^^^ private field
+6 |         marker: std::marker::PhantomData,
+  |         ^^^^^^ private field

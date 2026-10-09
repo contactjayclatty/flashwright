@@ -1,0 +1,64 @@
+# Step timeouts. timeout_s = max(min_s, base_s + ceil(size_bytes / floor_Bps)).
+# A multiplier from 1.0 to 4.0 may only lengthen timeout_s.
+
+[read]
+shell_s = 10
+su_id_s = 5
+
+[reboot]
+base_s = 30
+min_s = 30
+watchdog_s = 30
+
+[set_active]
+base_s = 30
+min_s = 30
+watchdog_s = 30
+
+[flash_boot]
+base_s = 60
+floor_bps = 4194304
+min_s = 90
+watchdog_s = 120
+
+[flash_bootloader]
+base_s = 120
+floor_bps = 4194304
+min_s = 180
+watchdog_s = 180
+
+[flash_radio]
+base_s = 120
+floor_bps = 4194304
+min_s = 180
+watchdog_s = 180
+
+[update]
+base_s = 600
+floor_bps = 3145728
+min_s = 900
+watchdog_s = 300
+
+[sideload]
+base_s = 900
+floor_bps = 2097152
+min_s = 1200
+watchdog_s = 300
+finalising_s = 900
+
+[push]
+base_s = 30
+floor_bps = 4194304
+min_s = 30
+watchdog_s = 60
+
+[pull]
+base_s = 30
+floor_bps = 4194304
+min_s = 60
+watchdog_s = 60
+
+[patch_script]
+base_s = 300
+min_s = 300
+watchdog_s = 120

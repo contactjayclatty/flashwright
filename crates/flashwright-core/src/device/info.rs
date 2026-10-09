@@ -6,15 +6,15 @@
 //! The transport collects the text. This module only applies the slot, lock,
 //! and init_boot rules, so the field mapping can be checked on fixtures.
 
-use flashwright_proc::RunResult;
+use crate::proc::RunResult;
 
-use crate::catalog::{AliasTable, DeviceTable};
-use crate::derive::{
+use crate::device::catalog::{AliasTable, DeviceTable};
+use crate::device::derive::{
     init_boot_from_ls, init_boot_from_size, interpret_su, lock_from_adb, lock_from_fastboot,
     parse_slot, prop,
 };
-use crate::parse::{parse_battery, parse_dumpsys_package, parse_getprop, parse_getvar};
-use crate::{BootTarget, DeviceInfo, InitBootPresence, Mode, RootState};
+use crate::device::parse::{parse_battery, parse_dumpsys_package, parse_getprop, parse_getvar};
+use crate::device::{BootTarget, DeviceInfo, InitBootPresence, Mode, RootState};
 
 pub struct AdbTexts {
     pub props: String,

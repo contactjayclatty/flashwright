@@ -10,7 +10,6 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-flashwright-proc = { path = "../flashwright-proc" }
 tokio.workspace = true
 thiserror.workspace = true
 serde.workspace = true

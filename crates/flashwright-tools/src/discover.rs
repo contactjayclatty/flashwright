@@ -3,13 +3,10 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-use flashwright_proc::{CommandRunner, Invocation, ProcessGroup};
 
 use crate::hashutil::sha256_file;
 use crate::policy::{classify, HostKind, PlatformToolsPolicy, ToolFiles, ToolsVerdict};
-use crate::version::{parse_adb_version_output, SdkVersion};
+use crate::version::{parse_adb_version_output, parse_fastboot_version_output, SdkVersion};
 use crate::ToolsError;
 
 /// File names inside a platform-tools directory.
@@ -96,6 +93,23 @@ pub fn directories_with_tools(request: &DiscoverRequest, names: &ToolBinaryNames
         .collect()
 }
 
+/// Output of one tool invocation used while locating platform-tools.
+pub struct ToolOutput {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub ok: bool,
+}
+
+/// Runs a verified argv. The process runner lives in the session crate.
+pub trait ToolInvoker: Send + Sync {
+    fn invoke<'a>(
+        &'a self,
+        program: &'a Path,
+        args: &'a [String],
+        detached: bool,
+    ) -> impl std::future::Future<Output = Result<ToolOutput, ToolsError>> + Send + 'a;
+}
+
 #[derive(Clone, Debug)]
 pub struct ToolsReport {
     pub directory: PathBuf,
@@ -104,9 +118,10 @@ pub struct ToolsReport {
     pub adb: PathBuf,
     pub fastboot: PathBuf,
     pub files: ToolFiles,
+    pub parser_profile: String,
 }
 
-pub async fn evaluate_installation<R: CommandRunner>(
+pub async fn evaluate_installation<R: ToolInvoker>(
     dir: &Path,
     names: &ToolBinaryNames,
     policy: &PlatformToolsPolicy,
@@ -135,34 +150,64 @@ pub async fn evaluate_installation<R: CommandRunner>(
         dll_sha256s,
     };
     let version = adb_version(runner, &adb).await?;
-    let verdict = classify(&version, &files, policy, host);
+    let fastboot_version = fastboot_version(runner, &fastboot).await?;
+    let adb_verdict = classify(&version, &files, policy, host);
+    let fastboot_verdict = classify(&fastboot_version, &files, policy, host);
+    let verdict = worse(adb_verdict, fastboot_verdict);
+    let parser_profile = policy
+        .allow
+        .iter()
+        .chain(policy.candidates.iter())
+        .find(|entry| entry.version.triple() == verdict.version().triple())
+        .map(|entry| entry.parser_profile.clone())
+        .unwrap_or_default();
     Ok(ToolsReport {
         directory: dir.to_path_buf(),
-        version,
+        version: verdict.version().clone(),
         verdict,
         adb,
         fastboot,
         files,
+        parser_profile,
     })
 }
 
-pub async fn adb_version<R: CommandRunner>(
-    runner: &R,
-    adb: &Path,
-) -> Result<SdkVersion, ToolsError> {
-    let result = runner
-        .run(Invocation {
-            program: adb.to_path_buf(),
-            args: vec!["version".into()],
-            timeout: Duration::from_secs(10),
-            watchdog: None,
-            group: ProcessGroup::TiedToParent,
-        })
-        .await?;
-    if !result.success_exit() {
+pub async fn adb_version<R: ToolInvoker>(runner: &R, adb: &Path) -> Result<SdkVersion, ToolsError> {
+    let output = runner.invoke(adb, &["version".into()], false).await?;
+    if !output.ok {
         return Err(ToolsError::Version {
-            detail: format!("adb version exited {:?}", result.exit_code),
+            detail: format!("adb version exited {:?}", output.exit_code),
         });
     }
-    parse_adb_version_output(&result.stdout_text())
+    parse_adb_version_output(&output.stdout)
+}
+
+pub async fn fastboot_version<R: ToolInvoker>(
+    runner: &R,
+    fastboot: &Path,
+) -> Result<SdkVersion, ToolsError> {
+    let output = runner
+        .invoke(fastboot, &["--version".into()], false)
+        .await?;
+    if !output.ok {
+        return Err(ToolsError::Version {
+            detail: format!("fastboot version exited {:?}", output.exit_code),
+        });
+    }
+    parse_fastboot_version_output(&output.stdout)
+}
+
+fn worse(left: ToolsVerdict, right: ToolsVerdict) -> ToolsVerdict {
+    fn rank(verdict: &ToolsVerdict) -> u8 {
+        match verdict {
+            ToolsVerdict::Blocked { .. } => 0,
+            ToolsVerdict::ScanOnly { .. } => 1,
+            ToolsVerdict::Allowed { .. } => 2,
+        }
+    }
+    if rank(&right) < rank(&left) {
+        right
+    } else {
+        left
+    }
 }

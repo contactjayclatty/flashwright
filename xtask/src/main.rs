@@ -3,18 +3,28 @@
 
 //! Static checks for the device layer.
 //!
-//! Product source must not name a shell or a batch file. Write-class helpers
-//! stay in the device crate until a plan crate exists.
+//! One process spawn site, no shell program names in product source, and the
+//! AGPL heading in LICENSE.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use syn::visit::{self, Visit};
+use syn::{Attribute, Expr, ExprCall, Meta};
+
 fn main() -> ExitCode {
-    match check(&workspace_root()) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("{err}");
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        Some("check") | None => match check(&workspace_root()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("{err}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(other) => {
+            eprintln!("unknown xtask command {other}");
             ExitCode::FAILURE
         }
     }
@@ -28,7 +38,11 @@ fn workspace_root() -> PathBuf {
 }
 
 fn check(root: &Path) -> Result<(), String> {
-    scan_sources(root)?;
+    let mut files = Vec::new();
+    walk(&root.join("crates"), &mut files)?;
+    walk(&root.join("xtask"), &mut files)?;
+    lint_spawn(root, &files)?;
+    lint_shell_names(root, &files)?;
     let license = fs::read_to_string(root.join("LICENSE")).map_err(|err| err.to_string())?;
     if !license.contains("GNU AFFERO GENERAL PUBLIC LICENSE") {
         return Err("LICENSE is missing the GNU AGPL heading".into());
@@ -36,30 +50,106 @@ fn check(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn scan_sources(root: &Path) -> Result<(), String> {
-    let crates = root.join("crates");
-    let mut files = Vec::new();
-    walk(&crates, &mut files)?;
+fn lint_spawn(root: &Path, files: &[PathBuf]) -> Result<(), String> {
+    let mut allows = Vec::new();
+    let mut calls = Vec::new();
     for path in files {
-        if skip_file(&path) {
+        let text = fs::read_to_string(path).map_err(|err| err.to_string())?;
+        let parsed =
+            syn::parse_file(&text).map_err(|err| format!("{}: {err}", display(root, path)))?;
+        let mut visitor = SpawnVisitor {
+            path: path.clone(),
+            allows: &mut allows,
+            calls: &mut calls,
+        };
+        visitor.visit_file(&parsed);
+    }
+    if allows.len() != 1 {
+        return Err(format!(
+            "expected exactly one clippy::disallowed_methods allow, found {}",
+            allows.len()
+        ));
+    }
+    let allow_path = display(root, &allows[0]);
+    if !allow_path
+        .replace('\\', "/")
+        .ends_with("flashwright-core/src/proc/spawn.rs")
+    {
+        return Err(format!("spawn allow is in {allow_path}"));
+    }
+    for call in &calls {
+        let shown = display(root, call);
+        if !shown
+            .replace('\\', "/")
+            .ends_with("flashwright-core/src/proc/spawn.rs")
+        {
+            return Err(format!("{shown} calls Command::new"));
+        }
+    }
+    if calls.is_empty() {
+        return Err("spawn.rs does not call Command::new".into());
+    }
+    Ok(())
+}
+
+struct SpawnVisitor<'a> {
+    path: PathBuf,
+    allows: &'a mut Vec<PathBuf>,
+    calls: &'a mut Vec<PathBuf>,
+}
+
+impl Visit<'_> for SpawnVisitor<'_> {
+    fn visit_attribute(&mut self, attr: &Attribute) {
+        if allow_disallowed(attr) {
+            self.allows.push(self.path.clone());
+        }
+        visit::visit_attribute(self, attr);
+    }
+
+    fn visit_expr(&mut self, expr: &Expr) {
+        if is_command_new(expr) {
+            self.calls.push(self.path.clone());
+        }
+        visit::visit_expr(self, expr);
+    }
+}
+
+fn allow_disallowed(attr: &Attribute) -> bool {
+    let Meta::List(list) = &attr.meta else {
+        return false;
+    };
+    list.path.is_ident("allow") && list.tokens.to_string().contains("disallowed_methods")
+}
+
+fn is_command_new(expr: &Expr) -> bool {
+    let Expr::Call(ExprCall { func, .. }) = expr else {
+        return false;
+    };
+    let Expr::Path(path) = func.as_ref() else {
+        return false;
+    };
+    let mut names = path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string());
+    let last = names.next_back();
+    let previous = names.next_back();
+    previous.as_deref() == Some("Command") && last.as_deref() == Some("new")
+}
+
+fn lint_shell_names(root: &Path, files: &[PathBuf]) -> Result<(), String> {
+    for path in files {
+        if skip_shell_scan(path) {
             continue;
         }
-        let text = fs::read_to_string(&path).map_err(|err| err.to_string())?;
-        let relative = path.strip_prefix(root).unwrap_or(&path);
-        let device_crate = relative.starts_with(Path::new("crates/flashwright-device"))
-            || relative.starts_with(Path::new("crates/flashwright-plan"));
-        for (number, line) in text.lines().enumerate() {
+        let text = fs::read_to_string(path).map_err(|err| err.to_string())?;
+        let lower = text.to_ascii_lowercase();
+        for (number, line) in lower.lines().enumerate() {
             if let Some(needle) = shell_needle(line) {
                 return Err(format!(
                     "{}:{} contains shell needle {needle}",
-                    relative.display(),
-                    number + 1
-                ));
-            }
-            if !device_crate && write_call(line) {
-                return Err(format!(
-                    "{}:{} calls a write-class helper outside the device crate",
-                    relative.display(),
+                    display(root, path),
                     number + 1
                 ));
             }
@@ -68,20 +158,19 @@ fn scan_sources(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn skip_file(path: &Path) -> bool {
-    let text = path.to_string_lossy();
-    text.ends_with("forbid.rs") || text.contains("/tests/") || text.contains("\\tests\\")
+fn skip_shell_scan(path: &Path) -> bool {
+    let text = path.to_string_lossy().replace('\\', "/");
+    text.ends_with("proc/forbid.rs") || text.ends_with("xtask/src/main.rs")
 }
 
 fn shell_needle(line: &str) -> Option<&'static str> {
-    const NEEDLES: &[&str] = &["cmd.exe", "cmd /c", "powershell", ".bat", "pwsh"];
+    const NEEDLES: &[&str] = &["cmd.exe", "cmd /c", "powershell", ".bat", ".cmd", "pwsh"];
     NEEDLES
         .iter()
         .copied()
         .find(|needle| contains_token(line, needle))
 }
 
-/// `.bat` is a file extension. It must not match a longer identifier such as `.battery`.
 fn contains_token(line: &str, needle: &str) -> bool {
     line.match_indices(needle).any(|(index, _)| {
         let after = index + needle.len();
@@ -92,26 +181,11 @@ fn contains_token(line: &str, needle: &str) -> bool {
     })
 }
 
-fn write_call(line: &str) -> bool {
-    const UNIQUE: &[&str] = &[
-        "WriteToken::mint",
-        "fn fastboot_flash(",
-        ".fastboot_flash(",
-        "fn fastboot_set_active(",
-        ".fastboot_set_active(",
-        "fn fastboot_update(",
-        ".fastboot_update(",
-        "fn shell_write(",
-        ".shell_write(",
-        "fn sideload(",
-        ".sideload(",
-    ];
-    if UNIQUE.iter().any(|needle| line.contains(needle)) {
-        return true;
-    }
-    line.contains(".reboot(")
-        || line.contains("fn reboot(")
-        || (line.contains(".push(") && line.contains("token"))
+fn display(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -122,6 +196,9 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
         let entry = entry.map_err(|err| err.to_string())?;
         let path = entry.path();
         if path.is_dir() {
+            if path.file_name().and_then(|name| name.to_str()) == Some("target") {
+                continue;
+            }
             walk(&path, out)?;
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
             out.push(path);

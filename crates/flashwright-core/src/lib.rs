@@ -3,22 +3,43 @@
 
 //! Session façade for the device layer.
 //!
-//! This crate selects tools, scans, and reads one phone. It does not flash,
-//! and it does not own the wizard. A blocked platform-tools build is refused
-//! before any device command runs.
+//! Process spawning, the command catalogue, and write tokens live in this
+//! crate. A blocked platform-tools build is refused before any device
+//! command runs.
+
+pub mod cmd;
+pub mod device;
+pub mod exe;
+pub mod parse;
+pub mod proc;
+pub mod timeouts;
+pub mod token;
+pub mod wizard;
+
+mod invoke;
+
+pub use serde;
+pub(crate) use token::ConfirmedPlan;
+pub use token::WriteToken;
+
+#[allow(dead_code)]
+fn confirmed_plan_stays_crate_private(plan: &ConfirmedPlan) -> &str {
+    plan.plan_hash()
+}
 
 use std::path::Path;
 use std::sync::Arc;
 
-use flashwright_device::{
-    AliasTable, DeviceInfo, DeviceTable, PlatformToolsTransport, ScanEntry, TransportConfig,
-};
-use flashwright_proc::CommandRunner;
 use flashwright_tools::{
     assess_server, evaluate_installation, probe_adb_server, restart_adb_server, HostKind,
-    PlatformToolsPolicy, ServerStatus, ToolBinaryNames, ToolsError, ToolsReport, ToolsVerdict,
-    DEFAULT_ADB_PORT,
+    PlatformToolsPolicy, ServerStatus, ToolBinaryNames, ToolInvoker, ToolsError, ToolsReport,
+    ToolsVerdict, DEFAULT_ADB_PORT,
 };
+
+use crate::device::{
+    AliasTable, DeviceInfo, DeviceTable, PlatformToolsTransport, ScanEntry, TransportConfig,
+};
+use crate::proc::CommandRunner;
 use flashwright_winusb::{classify, probe_host, HostProbe, RawUsbDevice, UsbReport, UsbTable};
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -43,10 +64,13 @@ pub enum CoreError {
     Tools(#[from] ToolsError),
 
     #[error(transparent)]
-    Device(#[from] flashwright_device::DeviceError),
+    Device(#[from] crate::device::DeviceError),
 
     #[error(transparent)]
     Usb(#[from] flashwright_winusb::UsbError),
+
+    #[error("{reason}")]
+    Rejected { reason: String },
 }
 
 /// Minimal events for a later UI. `v` is the payload version.
@@ -70,7 +94,7 @@ pub struct Session<R: CommandRunner> {
     events: broadcast::Sender<EngineEvent>,
 }
 
-impl<R: CommandRunner + 'static> Session<R> {
+impl<R: CommandRunner + ToolInvoker + 'static> Session<R> {
     pub fn new(runner: Arc<R>) -> Result<Self, CoreError> {
         Self::with_config(runner, TransportConfig::production())
     }
