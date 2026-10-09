@@ -374,6 +374,9 @@ impl<T: DeviceTransport> Engine<T> {
     }
 
     pub fn prepare_patch(&mut self, firmware_id: &str) -> Result<Snapshot, CoreError> {
+        if self.running || self.state != WizardState::PickFirmware {
+            return Err(CoreError::WrongState);
+        }
         let Some(firmware) = self.firmware.clone() else {
             self.notice = Some(block_notice("Check a package before patching."));
             return self.snapshot();
@@ -582,8 +585,10 @@ impl<T: DeviceTransport> Engine<T> {
             .as_ref()
             .map(|pending| pending.body.serial.clone())
             .unwrap_or_default();
+        let kind = self.pending.as_ref().map(|pending| pending.preview.kind);
         self.accept(plan_hash_value, false)?;
-        self.mint_for_run(plan_hash_value, &serial);
+        // The window engine has no catalogue writes yet. An empty write list mints nothing.
+        self.mint_for_run(plan_hash_value, &serial, &[]);
         let root_version = self
             .selected_info()
             .map(|info| info.root_tool_version)
@@ -640,11 +645,30 @@ impl<T: DeviceTransport> Engine<T> {
             }
             lines.push(log_line("run", quote_argv(&step.argv)));
         }
+        self.running = false;
+        self.stop_after_steps = None;
+        if kind == Some(PlanKind::PreparePatch) {
+            if let Some(firmware) = self.firmware.as_mut() {
+                firmware.patched_ready = true;
+            }
+            self.state = WizardState::PickFirmware;
+            self.job = JobView {
+                state: "succeeded".to_string(),
+                progress: 100,
+                status_line: "Patch ready".to_string(),
+                lines,
+                result_title: "Patch ready".to_string(),
+                result_body: "The patched image is ready. Nothing was flashed.".to_string(),
+                recovery: Vec::new(),
+                cancel_mode: "immediate".to_string(),
+            };
+            self.notice = None;
+            return self.snapshot();
+        }
         lines.push(log_line(
             "ok",
             format!("Updated to {build_id}. Root is working (Magisk app {root_version})."),
         ));
-        self.running = false;
         self.state = WizardState::Done;
         self.job = JobView {
             state: "succeeded".to_string(),
@@ -661,8 +685,12 @@ impl<T: DeviceTransport> Engine<T> {
     }
 
     pub fn cancel(&mut self) -> Result<Snapshot, CoreError> {
+        if self.state == WizardState::Done {
+            self.stop_after_steps = None;
+            return self.snapshot();
+        }
         self.stop_after_steps = Some(0);
-        if matches!(self.state, WizardState::Flash | WizardState::Done) || self.running {
+        if matches!(self.state, WizardState::Flash) || self.running {
             self.running = false;
             self.state = WizardState::Flash;
             self.job.state = "cancelled".to_string();
@@ -716,26 +744,32 @@ impl<T: DeviceTransport> Engine<T> {
                 reason: "Unknown recovery option.".to_string(),
             });
         }
-        let info = self.selected_info();
-        let active = info.as_ref().and_then(|info| info.active_slot);
-        let target = inactive_slot(active)?;
-        let serial = self.selected.clone().unwrap_or_default();
-        let slot = target.as_str();
-        let steps = vec![super::steps::Step {
-            idx: 1,
-            id: format!("recovery_{option_id}"),
-            class: StepClass::Write,
-            tool: super::steps::Tool::Fastboot,
-            argv: vec![
-                "fastboot".to_string(),
-                "-s".to_string(),
-                serial,
-                "--slot".to_string(),
-                slot.to_string(),
-                option_id.to_string(),
-            ],
-            timeout_s: 120,
-        }];
+        let info = self.selected_info().ok_or_else(|| CoreError::Rejected {
+            reason: "Select a phone before recovery.".to_string(),
+        })?;
+        let source = info.active_slot.ok_or_else(|| CoreError::Rejected {
+            reason: "The active slot is unknown.".to_string(),
+        })?;
+        let target = inactive_slot(Some(source))?;
+        let partition = if info.uses_init_boot {
+            "init_boot"
+        } else {
+            "boot"
+        };
+        let sha = self
+            .firmware
+            .as_ref()
+            .map(|firmware| firmware.sha256.clone())
+            .unwrap_or_default();
+        let steps = vec![recovery_step(
+            option_id,
+            &info.serial,
+            source,
+            target,
+            partition,
+            &cache_image("patched", &sha),
+            &cache_image("stock", &sha),
+        )?];
         self.issue(PlanKind::Recovery, false, None, steps, Route::Ota)?;
         self.notice = Some(Notice {
             level: "info".to_string(),
@@ -755,12 +789,21 @@ impl<T: DeviceTransport> Engine<T> {
         self.snapshot()
     }
 
-    pub fn restore_plan(&mut self, set_id: &str, _item: &str) -> Result<Snapshot, CoreError> {
+    pub fn restore_plan(&mut self, set_id: &str, item: &str) -> Result<Snapshot, CoreError> {
+        if self.running
+            || matches!(
+                self.state,
+                WizardState::Flash | WizardState::Done | WizardState::Patching
+            )
+        {
+            return Err(CoreError::WrongState);
+        }
         if set_id != BACKUP_SET_ID {
             return Err(CoreError::Rejected {
                 reason: "That backup set is not on this computer.".to_string(),
             });
         }
+        let image = backup_item_path(item)?;
         let info = self.selected_info().ok_or_else(|| CoreError::Rejected {
             reason: "Select a phone before restoring.".to_string(),
         })?;
@@ -784,7 +827,7 @@ impl<T: DeviceTransport> Engine<T> {
                 target.as_str().to_string(),
                 "flash".to_string(),
                 partition.to_string(),
-                "backup.img".to_string(),
+                image,
             ],
             timeout_s: 120,
         }];
@@ -828,6 +871,11 @@ impl<T: DeviceTransport> Engine<T> {
     #[cfg(test)]
     pub fn consumed_contains(&self, plan_hash_value: &str) -> bool {
         self.consumed.contains(plan_hash_value)
+    }
+
+    #[cfg(test)]
+    pub fn stop_limit(&self) -> Option<u32> {
+        self.stop_after_steps
     }
 
     #[cfg(test)]
@@ -931,7 +979,7 @@ impl<T: DeviceTransport> Engine<T> {
             sha256: sha,
             codename,
             build_id: "HQ1A.MOCK.002".to_string(),
-            patched_ready: true,
+            patched_ready: false,
             partition: partition.to_string(),
         });
         self.pending = None;
@@ -1142,10 +1190,13 @@ impl<T: DeviceTransport> Engine<T> {
         None
     }
 
-    fn mint_for_run(&self, plan_hash_value: &str, serial: &str) {
+    fn mint_for_run(&self, plan_hash_value: &str, serial: &str, writes: &[crate::cmd::WriteCmd]) {
+        if writes.is_empty() {
+            return;
+        }
         #[cfg(test)]
         let _gate = crate::token::test_gate_blocking();
-        let (_plan, token) = mint_confirmed(plan_hash_value, serial, &[]);
+        let (_plan, token) = mint_confirmed(plan_hash_value, serial, writes);
         drop(token);
     }
 
@@ -1368,6 +1419,91 @@ fn visible_phase(state: WizardState) -> Phase {
         WizardState::Done => Phase::Done,
         WizardState::Recovery => Phase::Recovery,
     }
+}
+
+fn cache_image(kind: &str, sha: &str) -> String {
+    let prefix = if sha.len() >= 12 { &sha[..12] } else { "stock" };
+    format!("%LOCALAPPDATA%\\Flashwright\\cache\\{kind}\\{prefix}.img")
+}
+
+fn backup_item_path(item: &str) -> Result<String, CoreError> {
+    let ok = !item.is_empty()
+        && item.len() <= 128
+        && !item.starts_with('.')
+        && item.contains('.')
+        && item
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-');
+    if !ok {
+        return Err(CoreError::Rejected {
+            reason: "That backup item is not in this set.".to_string(),
+        });
+    }
+    Ok(format!(
+        "%LOCALAPPDATA%\\Flashwright\\backups\\{BACKUP_SET_ID}\\{item}"
+    ))
+}
+
+fn recovery_step(
+    option_id: &str,
+    serial: &str,
+    source: Slot,
+    target: Slot,
+    partition: &str,
+    patched: &str,
+    stock: &str,
+) -> Result<Step, CoreError> {
+    let (class, tool, argv) = match option_id {
+        "switch_back" => (
+            StepClass::Write,
+            super::steps::Tool::Fastboot,
+            vec![
+                "fastboot".to_string(),
+                "-s".to_string(),
+                serial.to_string(),
+                format!("--set-active={}", source.as_str()),
+            ],
+        ),
+        "leave" => (
+            StepClass::Read,
+            super::steps::Tool::Internal,
+            vec!["report".to_string(), serial.to_string()],
+        ),
+        "retry" | "stock" | "restore" => {
+            let image = match option_id {
+                "retry" => patched.to_string(),
+                "stock" => stock.to_string(),
+                _ => backup_item_path("init_boot.img")?,
+            };
+            (
+                StepClass::Write,
+                super::steps::Tool::Fastboot,
+                vec![
+                    "fastboot".to_string(),
+                    "-s".to_string(),
+                    serial.to_string(),
+                    "--slot".to_string(),
+                    target.as_str().to_string(),
+                    "flash".to_string(),
+                    partition.to_string(),
+                    image,
+                ],
+            )
+        }
+        _ => {
+            return Err(CoreError::Rejected {
+                reason: "Unknown recovery option.".to_string(),
+            })
+        }
+    };
+    Ok(Step {
+        idx: 1,
+        id: format!("recovery_{option_id}"),
+        class,
+        tool,
+        argv,
+        timeout_s: 120,
+    })
 }
 
 fn recovery_options(target: Slot, source: Slot) -> Vec<RecoveryOption> {

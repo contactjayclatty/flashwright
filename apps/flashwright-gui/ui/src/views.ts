@@ -553,8 +553,10 @@ function footerFor(model: ShellModel): HTMLElement {
     footer.append(keyButton("next", "fw-btn fw-btn--default", "N", "ext", !canAdvance(model)));
   }
   if (phase === "review" && model.snap.plan) {
-    const dryDefault = model.snap.choice.prefer_dry_run;
-    footer.append(keyButton("dry-run", dryDefault ? "fw-btn fw-btn--default" : "fw-btn", "D", "ry run"));
+    const dryDefault = model.snap.plan.dry_run;
+    if (dryDefault) {
+      footer.append(keyButton("dry-run", "fw-btn fw-btn--default", "D", "ry run"));
+    }
     const flashClass = dryDefault ? "fw-btn fw-btn--primary" : "fw-btn fw-btn--primary fw-btn--default";
     footer.append(keyButton("flash", flashClass, "F", "lash…"));
   }
@@ -793,12 +795,13 @@ function stopDialog(): HTMLElement {
     role: "alertdialog",
     "aria-modal": "true",
     "aria-labelledby": "stop-title",
+    "aria-describedby": "stop-body",
   });
   dialog.append(
     el("div", { class: "fw-titlebar" }, [el("span", { class: "fw-titlebar__title" }, ["Stop"])]),
     el("div", { class: "fw-dialog__body" }, [
       el("h2", { id: "stop-title" }, ["Are you sure?"]),
-      el("p", {}, ["The current step will finish, then the job stops."]),
+      el("p", { id: "stop-body" }, ["The current step will finish, then the job stops."]),
     ]),
     el("div", { class: "fw-dialog__actions" }, [stop, cancel]),
   );

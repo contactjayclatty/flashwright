@@ -35,7 +35,78 @@ The rows below are rewritten behaviour, not copied PixelFlasher source. Crate li
 | serde 1.0.229, serde_json 1.0.151, serde_jcs 0.1.0 (https://github.com/l1h3r/serde_jcs), sha2 0.10.9, hex 0.4.3, thiserror 2.0.21, uuid 1.11.0 | crates.io packages of the same names | MIT OR Apache-2.0 | `crates/flashwright-core` | Plan hashing uses JCS via `serde_jcs`. The workspace pins uuid 1.11.0 so the 1.88 toolchain can build it. |
 | IBM Plex Sans and IBM Plex Mono (OFL-1.1) | https://github.com/IBM/plex commit `763c36ef9117782905ae010056dfbe8fd2653a25`, files under `packages/plex-sans/fonts/complete/woff2` and `packages/plex-mono/fonts/complete/woff2` | SIL Open Font License 1.1 | `apps/flashwright-gui/ui/theme/fonts` | “Plex” is a Reserved Font Name and the family name is unchanged. |
 | Vite 6.4.4 and TypeScript | https://github.com/vitejs/vite and https://github.com/microsoft/TypeScript | MIT (Vite), Apache-2.0 (TypeScript) | Wizard bundle tooling | Dev and build tooling only. |
-| Flashwright UI skin | Original sheet supplied for this product (`flashwright-ui.css`) | AGPL-3.0-or-later, with the repository | `apps/flashwright-gui/ui/theme` | Original Clatty Works skin. Not a third-party logo. |
+| Flashwright UI skin | Original sheet supplied for this product (`flashwright-ui.css`) | AGPL-3.0-or-later, with the repository | `apps/flashwright-gui/ui/theme` and `assets/brand/flashwright` | Clatty Works brand assets (in-house) |
+
+### Brand asset files
+
+Clatty Works brand assets (in-house). Each file under `assets/brand/flashwright`:
+
+- `assets/brand/flashwright/app-icon/app-icon-16.png`
+- `assets/brand/flashwright/app-icon/app-icon-16.svg`
+- `assets/brand/flashwright/app-icon/app-icon-24.svg`
+- `assets/brand/flashwright/app-icon/app-icon-256.png`
+- `assets/brand/flashwright/app-icon/app-icon-32.png`
+- `assets/brand/flashwright/app-icon/app-icon-48.png`
+- `assets/brand/flashwright/app-icon/app-icon-512.png`
+- `assets/brand/flashwright/app-icon/app-icon.ico`
+- `assets/brand/flashwright/app-icon/app-icon.svg`
+- `assets/brand/flashwright/banner/wizard-banner@2x.png`
+- `assets/brand/flashwright/banner/wizard-banner.png`
+- `assets/brand/flashwright/banner/wizard-banner.svg`
+- `assets/brand/flashwright/flashwright-assets-sheet.png`
+- `assets/brand/flashwright/flashwright-ui.css`
+- `assets/brand/flashwright/icons/backup-16.png`
+- `assets/brand/flashwright/icons/backup-16.svg`
+- `assets/brand/flashwright/icons/backup-32.png`
+- `assets/brand/flashwright/icons/backup-32.svg`
+- `assets/brand/flashwright/icons/download-16.png`
+- `assets/brand/flashwright/icons/download-16.svg`
+- `assets/brand/flashwright/icons/download-32.png`
+- `assets/brand/flashwright/icons/download-32.svg`
+- `assets/brand/flashwright/icons/flash-16.png`
+- `assets/brand/flashwright/icons/flash-16.svg`
+- `assets/brand/flashwright/icons/flash-32.png`
+- `assets/brand/flashwright/icons/flash-32.svg`
+- `assets/brand/flashwright/icons/help-16.png`
+- `assets/brand/flashwright/icons/help-16.svg`
+- `assets/brand/flashwright/icons/help-32.png`
+- `assets/brand/flashwright/icons/help-32.svg`
+- `assets/brand/flashwright/icons/log-16.png`
+- `assets/brand/flashwright/icons/log-16.svg`
+- `assets/brand/flashwright/icons/log-32.png`
+- `assets/brand/flashwright/icons/log-32.svg`
+- `assets/brand/flashwright/icons/phone-connect-16.png`
+- `assets/brand/flashwright/icons/phone-connect-16.svg`
+- `assets/brand/flashwright/icons/phone-connect-32.png`
+- `assets/brand/flashwright/icons/phone-connect-32.svg`
+- `assets/brand/flashwright/icons/root-16.png`
+- `assets/brand/flashwright/icons/root-16.svg`
+- `assets/brand/flashwright/icons/root-32.png`
+- `assets/brand/flashwright/icons/root-32.svg`
+- `assets/brand/flashwright/icons/settings-16.png`
+- `assets/brand/flashwright/icons/settings-16.svg`
+- `assets/brand/flashwright/icons/settings-32.png`
+- `assets/brand/flashwright/icons/settings-32.svg`
+- `assets/brand/flashwright/icons/success-16.png`
+- `assets/brand/flashwright/icons/success-16.svg`
+- `assets/brand/flashwright/icons/success-32.png`
+- `assets/brand/flashwright/icons/success-32.svg`
+- `assets/brand/flashwright/icons/warning-16.png`
+- `assets/brand/flashwright/icons/warning-16.svg`
+- `assets/brand/flashwright/icons/warning-32.png`
+- `assets/brand/flashwright/icons/warning-32.svg`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal-1600.png`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal-800.png`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal-on-deep-teal-1600.png`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal-on-deep-teal-800.png`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal-on-deep-teal.svg`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal-on-white-1600.png`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal-on-white-800.png`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal-on-white.svg`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal.svg`
+- `assets/brand/flashwright/src/build.py`
+- `assets/brand/flashwright/src/lockup.py`
+- `assets/brand/flashwright/src/pixels.py`
 
 ## Safety tables
 

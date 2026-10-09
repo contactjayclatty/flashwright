@@ -54,4 +54,4 @@ Versions are the ones resolved in `Cargo.lock` on 9 Oct 2026.
 
 IBM’s licence reserves the font name “Plex”. The files keep the upstream family name.
 
-The wizard skin (`flashwright-ui.css`) is an original Clatty Works sheet shipped with this repository. The icon and banner marks are original. They are not a third-party logo.
+Clatty Works brand assets (in-house). The file list is in `docs/disclaimer.md`. They are not a third-party logo.

@@ -580,7 +580,7 @@ fn argv_never_names_every_slot() {
 
 #[test]
 fn prepare_patch_reviews_that_kind() {
-    let mut engine = ready_plan();
+    let mut engine = firmware_engine();
     let id = engine.snapshot().unwrap().firmware.unwrap().id;
     let snap = engine.prepare_patch(&id).unwrap();
     let plan = snap.plan.unwrap();
@@ -590,6 +590,133 @@ fn prepare_patch_reviews_that_kind() {
     assert_eq!(snap.review_kind, Some(PlanKind::PreparePatch));
     let err = engine.dry_run(&plan.plan_hash).unwrap_err();
     assert!(matches!(err, CoreError::NotDryRun));
+}
+
+fn firmware_engine() -> Engine<MockTransport> {
+    let mut engine = engine();
+    engine.select_device(PRIMARY_SERIAL).unwrap();
+    engine.continue_from_connect().unwrap();
+    engine
+        .set_choice("update_keep_root", Route::Ota, true)
+        .unwrap();
+    engine.continue_from_choose().unwrap();
+    engine
+        .firmware_open(FIXTURE_OTA_NAME, FIXTURE_SHA256)
+        .unwrap();
+    engine
+}
+
+#[test]
+fn prepare_patch_and_restore_refuse_the_wrong_step() {
+    let mut engine = ready_plan();
+    let id = engine.snapshot().unwrap().firmware.unwrap().id;
+    let err = engine.prepare_patch(&id).unwrap_err();
+    assert!(matches!(err, CoreError::WrongState));
+    engine.testing_set_state("flash");
+    let err = engine
+        .restore_plan("4f2a9c01-0000-7000-8000-000000000001", "init_boot.img")
+        .unwrap_err();
+    assert!(matches!(err, CoreError::WrongState));
+    engine.testing_set_state("done");
+    let err = engine
+        .restore_plan("4f2a9c01-0000-7000-8000-000000000001", "init_boot.img")
+        .unwrap_err();
+    assert!(matches!(err, CoreError::WrongState));
+}
+
+#[test]
+fn prepare_patch_confirm_returns_to_firmware() {
+    let mut engine = firmware_engine();
+    let id = engine.snapshot().unwrap().firmware.unwrap().id;
+    assert!(!engine.snapshot().unwrap().firmware.unwrap().patched_ready);
+    let hash = engine.prepare_patch(&id).unwrap().plan.unwrap().plan_hash;
+    let snap = engine.confirm_and_run(&hash).unwrap();
+    assert_eq!(snap.phase, Phase::Firmware);
+    assert!(snap.firmware.unwrap().patched_ready);
+    let text = format!("{} {}", snap.job.result_title, snap.job.result_body);
+    assert!(!text.contains("Updated to"));
+    assert!(snap.job.result_title.contains("Patch ready"));
+}
+
+#[test]
+fn review_buttons_follow_the_plan_dry_run_flag() {
+    let dry = ready_plan();
+    let plan = dry.snapshot().unwrap().plan.unwrap();
+    assert!(plan.dry_run);
+    assert!(plan.plan_code.starts_with("DRY "));
+    let mut real = ready_plan();
+    let dry_hash = plan_hash(&real);
+    let plan = real.dry_run(&dry_hash).unwrap().plan.unwrap();
+    assert!(!plan.dry_run);
+    assert!(plan.plan_code.starts_with("PLAN "));
+    assert_eq!(plan.after_dry_run.as_deref(), Some(dry_hash.as_str()));
+}
+
+#[test]
+fn cancel_after_done_is_a_no_op() {
+    let mut engine = ready_plan();
+    let hash = engine
+        .dry_run(&plan_hash(&engine))
+        .unwrap()
+        .plan
+        .unwrap()
+        .plan_hash;
+    let snap = engine.confirm_and_run(&hash).unwrap();
+    assert_eq!(snap.phase, Phase::Done);
+    let title = snap.job.result_title.clone();
+    engine.arm_stop_after(0);
+    assert_eq!(engine.stop_limit(), Some(0));
+    let snap = engine.cancel().unwrap();
+    assert_eq!(snap.phase, Phase::Done);
+    assert_eq!(snap.job.state, "succeeded");
+    assert_eq!(snap.job.result_title, title);
+    assert_eq!(engine.stop_limit(), None);
+}
+
+#[test]
+fn recovery_argv_names_a_real_command_and_restore_uses_the_item() {
+    let mut engine = ready_plan();
+    let hash = engine
+        .dry_run(&plan_hash(&engine))
+        .unwrap()
+        .plan
+        .unwrap()
+        .plan_hash;
+    engine.confirm_with_fault(&hash, true).unwrap();
+    let back = engine.recovery_plan("switch_back").unwrap();
+    let argv = back.plan.unwrap().steps[0].argv.clone();
+    assert!(argv.iter().any(|arg| arg == "--set-active=a"), "{argv:?}");
+    assert!(!argv.iter().any(|arg| arg == "switch_back"));
+    engine.testing_set_state("recovery");
+    let stock = engine.recovery_plan("stock").unwrap();
+    let argv = stock.plan.unwrap().steps[0].argv.clone();
+    assert!(argv.windows(2).any(|pair| pair[0] == "flash"));
+    assert!(!argv.iter().any(|arg| arg == "stock"), "{argv:?}");
+    let snap = engine
+        .restore_plan("4f2a9c01-0000-7000-8000-000000000001", "init_boot.img")
+        .unwrap();
+    let argv = snap.plan.unwrap().steps[0].argv.clone();
+    assert!(
+        argv.iter()
+            .any(|arg| arg.ends_with("init_boot.img") && arg.contains("4f2a9c01")),
+        "{argv:?}"
+    );
+    assert!(!argv.iter().any(|arg| arg == "backup.img"));
+}
+
+#[test]
+fn confirm_with_no_writes_mints_no_token() {
+    let _gate = crate::token::test_gate_blocking();
+    let before = crate::token::open_run_count();
+    let mut engine = ready_plan();
+    let hash = engine
+        .dry_run(&plan_hash(&engine))
+        .unwrap()
+        .plan
+        .unwrap()
+        .plan_hash;
+    engine.confirm_and_run(&hash).unwrap();
+    assert_eq!(crate::token::open_run_count(), before);
 }
 
 proptest! {
@@ -618,6 +745,32 @@ proptest! {
                 }
                 5 => { let _ = engine.cancel(); }
                 6 => { let _ = engine.backups_list(); }
+                7 => {
+                    let id = engine
+                        .snapshot()
+                        .unwrap()
+                        .firmware
+                        .as_ref()
+                        .map(|firmware| firmware.id.clone())
+                        .unwrap_or_default();
+                    let outcome = engine.prepare_patch(&id);
+                    if outcome.is_ok() {
+                        prop_assert_eq!(previous, Phase::Firmware);
+                    } else {
+                        prop_assert!(matches!(outcome.unwrap_err(), CoreError::WrongState));
+                    }
+                }
+                8 => {
+                    let outcome = engine.restore_plan(
+                        "4f2a9c01-0000-7000-8000-000000000001",
+                        "init_boot.img",
+                    );
+                    if outcome.is_ok() {
+                        prop_assert!(!matches!(previous, Phase::Flash | Phase::Done));
+                    } else {
+                        prop_assert!(matches!(outcome.unwrap_err(), CoreError::WrongState));
+                    }
+                }
                 _ => { let _ = engine.snapshot(); }
             }
             let snap = engine.snapshot().unwrap();

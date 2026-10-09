@@ -264,8 +264,13 @@ impl<R: CommandRunner> WizardSession<R> {
                 PlanStep::Read(_) => None,
             })
             .collect();
-        let (plan, token) = mint_confirmed(&held.hash, &held.serial, &writes);
-        self.transport.arm(&plan);
+        let token = if writes.is_empty() {
+            None
+        } else {
+            let (plan, token) = mint_confirmed(&held.hash, &held.serial, &writes);
+            self.transport.arm(&plan);
+            Some(token)
+        };
         let mut lines = Vec::new();
         for step in &held.steps {
             match step {
@@ -290,7 +295,11 @@ impl<R: CommandRunner> WizardSession<R> {
                             .join("; ");
                         return Err(rejected(format!("Blocked: {reason}")));
                     }
-                    let result = self.transport.run_write(&token, cmd.clone()).await;
+                    let Some(token) = token.as_ref() else {
+                        self.phase = Phase::Recovery;
+                        return Err(rejected("A write step failed."));
+                    };
+                    let result = self.transport.run_write(token, cmd.clone()).await;
                     match result {
                         Ok(result) if write_ok(cmd, &result) => {
                             lines.push(result.stdout_text());
@@ -442,7 +451,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::cmd::{AdbHostWrite, DeviceSerial, FastbootWrite, ImageRef, RebootMode};
+    use crate::cmd::{
+        AdbHostRead, AdbHostWrite, DeviceSerial, FastbootWrite, ImageRef, ReadCmd, RebootMode,
+    };
     use crate::device::{Partition, Slot, TransportConfig};
     use crate::proc::{ScriptedResponse, ScriptedRunner};
     use crate::token::open_run_count;
@@ -548,6 +559,32 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("expired"));
         assert_eq!(session.phase(), Phase::Review);
+    }
+
+    #[tokio::test]
+    async fn an_empty_write_list_mints_no_token() {
+        let _gate = gate().await;
+        let runner = Arc::new(ScriptedRunner::new());
+        let name = if cfg!(windows) { "adb.exe" } else { "adb" };
+        runner.on(
+            name,
+            &["version"],
+            ScriptedResponse::ok("Android Debug Bridge"),
+        );
+        let mut session = session(Arc::clone(&runner), 1_000);
+        let preview = session
+            .build_plan(PlanDraft {
+                serial: "pixel1".into(),
+                dry_run: false,
+                expires_unix_ms: 5_000,
+                steps: vec![PlanStep::Read(ReadCmd::AdbHost(AdbHostRead::Version))],
+            })
+            .unwrap();
+        let before = open_run_count();
+        let report = session.confirm_and_run(&preview.plan_hash).await.unwrap();
+        assert_eq!(report.lines.len(), 1);
+        assert_eq!(open_run_count(), before);
+        assert_eq!(session.phase(), Phase::Done);
     }
 
     fn komodo_serial() -> DeviceSerial {

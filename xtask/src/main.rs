@@ -40,6 +40,7 @@ fn workspace_root() -> PathBuf {
 fn check(root: &Path) -> Result<(), String> {
     let mut files = Vec::new();
     walk(&root.join("crates"), &mut files)?;
+    walk(&root.join("apps"), &mut files)?;
     walk(&root.join("xtask"), &mut files)?;
     lint_spawn(root, &files)?;
     lint_shell_names(root, &files)?;
