@@ -609,6 +609,6 @@ mod golden {
             let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/cmd/golden_argv.txt");
             std::fs::write(path, &actual).unwrap();
         }
-        assert_eq!(actual, expected);
+        assert_eq!(actual, expected.replace("\r\n", "\n"));
     }
 }
