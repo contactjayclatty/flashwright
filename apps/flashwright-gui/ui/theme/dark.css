@@ -1,0 +1,16 @@
+/* Dark variant: remap semantic tokens only. */
+.fw-app[data-theme="dark"] {
+  --fw-surface: #32383c;
+  --fw-field: #1e2428;
+  --fw-ink: #f2f4f5;
+  --fw-ink-muted: #8fd0d0;
+  --fw-ink-disabled: #8e959a;
+  --fw-title-bg: #0a5c5c;
+  --fw-title-ink: #ffffff;
+  --fw-console-bg: #14181b;
+  --fw-console-ink: #f2f4f5;
+  --fw-hi: #4a5258;
+  --fw-lo: #14181b;
+  --fw-outline: #0a0c0d;
+  --fw-focus: #8fd0d0;
+}

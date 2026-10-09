@@ -1,0 +1,38 @@
+[package]
+name = "flashwright-gui"
+description = "Flashwright window for the Windows update wizard."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "flashwright_gui"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
+gui = [
+    "dep:flashwright-wizard",
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-opener",
+]
+
+[[bin]]
+name = "flashwright-gui"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true }
+
+[dependencies]
+flashwright-wizard = { path = "../../../crates/flashwright-wizard", optional = true }
+tauri = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
