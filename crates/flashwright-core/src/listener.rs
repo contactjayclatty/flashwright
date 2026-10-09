@@ -46,6 +46,7 @@ fn unix_listen_inode(port: u16) -> Option<u64> {
 }
 
 /// `local_address` is `ADDR:PORT` in hex. State `0A` is listen.
+#[cfg(any(unix, test))]
 pub(crate) fn inode_in_tcp_table(text: &str, port: u16) -> Option<u64> {
     for line in text.lines().skip(1) {
         let mut cols = line.split_whitespace();
@@ -71,6 +72,7 @@ pub(crate) fn inode_in_tcp_table(text: &str, port: u16) -> Option<u64> {
     None
 }
 
+#[cfg(any(unix, test))]
 fn loopback_address(addr: &str) -> bool {
     let lower = addr.to_ascii_lowercase();
     matches!(

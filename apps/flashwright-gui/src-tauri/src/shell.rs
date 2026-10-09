@@ -105,7 +105,7 @@ async fn pick_path(
     }
     rx.recv()
         .await
-        .map_err(|_| "The file dialog closed.".to_string())
+        .ok_or_else(|| "The file dialog closed.".to_string())
 }
 
 #[tauri::command]
