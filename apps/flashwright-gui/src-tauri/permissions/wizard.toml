@@ -1,0 +1,69 @@
+[[permission]]
+identifier = "allow-engine-snapshot"
+description = "Read the wizard snapshot."
+commands.allow = ["engine_snapshot"]
+
+[[permission]]
+identifier = "allow-scan"
+description = "Scan for mock phones."
+commands.allow = ["scan"]
+
+[[permission]]
+identifier = "allow-select-device"
+description = "Select a mock phone."
+commands.allow = ["select_device"]
+
+[[permission]]
+identifier = "allow-continue-from-connect"
+description = "Leave the connect step."
+commands.allow = ["continue_from_connect"]
+
+[[permission]]
+identifier = "allow-set-choice"
+description = "Set the wizard choice."
+commands.allow = ["set_choice"]
+
+[[permission]]
+identifier = "allow-continue-from-choose"
+description = "Leave the choose step."
+commands.allow = ["continue_from_choose"]
+
+[[permission]]
+identifier = "allow-open-firmware"
+description = "Check a firmware package name and checksum."
+commands.allow = ["open_firmware"]
+
+[[permission]]
+identifier = "allow-build-plan"
+description = "Build a plan from the checked package."
+commands.allow = ["build_plan"]
+
+[[permission]]
+identifier = "allow-dry-run"
+description = "Print the plan without writing."
+commands.allow = ["dry_run"]
+
+[[permission]]
+identifier = "allow-confirm-and-run"
+description = "Confirm the issued plan hash."
+commands.allow = ["confirm_and_run"]
+
+[[permission]]
+identifier = "allow-back"
+description = "Step back in the wizard."
+commands.allow = ["back"]
+
+[[permission]]
+identifier = "allow-open-external"
+description = "Open an allow-listed page from the host."
+commands.allow = ["open_external"]
+
+[[permission]]
+identifier = "allow-recovery-plan"
+description = "Preview a recovery option."
+commands.allow = ["recovery_plan"]
+
+[[permission]]
+identifier = "allow-pick-package"
+description = "Pick a package file name."
+commands.allow = ["pick_package"]

@@ -47,6 +47,8 @@
 
 <p>The first build will be the monthly Magisk update-and-keep-root wizard for Windows 11 x64.</p>
 
+<p>The wizard window is in <code>apps/flashwright-gui</code>. This build uses sample phones and does not write to a device.</p>
+
 <p>Android and Pixel are trademarks of Google LLC, used descriptively. Flashing can void warranties or brick devices; use at your own risk.</p>
 
 <p>

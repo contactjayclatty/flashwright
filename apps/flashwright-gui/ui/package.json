@@ -1,0 +1,20 @@
+{
+  "name": "flashwright-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
+    "screenshots": "node scripts/screenshots.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.2"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.55.0",
+    "typescript": "~5.9.0",
+    "vite": "^6.3.5"
+  }
+}

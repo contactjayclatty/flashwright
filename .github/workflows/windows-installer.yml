@@ -1,0 +1,82 @@
+name: Windows installer
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/flashwright-gui/ui/package-lock.json
+      - name: Test the workspace
+        run: cargo test --workspace
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Static checks
+        run: cargo run -p xtask -- check
+      - name: Wizard bundle
+        working-directory: apps/flashwright-gui/ui
+        run: npm ci && npm run build
+      - name: Theme boundary
+        run: node scripts/check-theme-boundary.mjs
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            apps/flashwright-gui/package-lock.json
+            apps/flashwright-gui/ui/package-lock.json
+      - name: Install Tauri CLI
+        working-directory: apps/flashwright-gui
+        run: npm ci
+      - name: Install wizard UI
+        working-directory: apps/flashwright-gui/ui
+        run: npm ci
+      - name: Build NSIS installer
+        working-directory: apps/flashwright-gui
+        run: npx tauri build --bundles nsis
+      - name: Record installer size
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "target/release/bundle/nsis",
+            "apps/flashwright-gui/src-tauri/target/release/bundle/nsis"
+          )
+          $bundle = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $files = @()
+          if ($bundle) {
+            $files = @(Get-ChildItem -Path $bundle -File)
+          }
+          $lines = @("### Windows NSIS", "", "| File | Bytes |", "| --- | ---: |")
+          foreach ($file in $files) {
+            $lines += "| $($file.Name) | $($file.Length) |"
+          }
+          if (-not $files) {
+            $lines += "| (none) | 0 |"
+            $lines -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+            throw "NSIS bundle was not produced"
+          }
+          $lines -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          $files | ForEach-Object { Write-Output "$($_.FullName) $($_.Length)" }

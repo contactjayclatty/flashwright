@@ -1,0 +1,6 @@
+{
+  "name": "Flashwright",
+  "version": "0.1.0",
+  "css": ["flashwright-ui.css", "fonts.css", "extras.css", "dark.css"],
+  "fonts": ["IBM Plex Sans", "IBM Plex Mono"]
+}
