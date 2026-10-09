@@ -3,12 +3,12 @@
 
 use serde::Deserialize;
 
-use crate::DeviceError;
+use crate::device::DeviceError;
 
-const ALIASES: &str = include_str!("../../../data/device_aliases.toml");
-const DEVICES: &str = include_str!("../../../data/devices.toml");
-const KNOWN_BAD: &str = include_str!("../../../data/known_bad_magisk.toml");
-const MIN_BOOTLOADER: &str = include_str!("../../../data/min_bootloader.toml");
+const ALIASES: &str = include_str!("../../../../data/device_aliases.toml");
+const DEVICES: &str = include_str!("../../../../data/devices.toml");
+const KNOWN_BAD: &str = include_str!("../../../../data/known_bad_magisk.toml");
+const MIN_BOOTLOADER: &str = include_str!("../../../../data/min_bootloader.toml");
 
 #[derive(Clone, Debug)]
 pub struct AliasTable {

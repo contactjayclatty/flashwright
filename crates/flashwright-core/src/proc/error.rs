@@ -28,6 +28,10 @@ pub enum ProcError {
     #[error("no scripted response for {program} args {args:?}")]
     NoScript { program: String, args: Vec<String> },
 
+    /// The program was not accepted as a verified executable.
+    #[error("{detail}")]
+    Unverified { detail: String },
+
     /// A Windows job object could not be created or assigned.
     #[error("failed to assign the process to a job: {0}")]
     Job(String),

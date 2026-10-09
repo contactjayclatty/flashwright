@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `WriteToken` in the current scope
+ --> tests/compile_fail/clone.rs:3:25
+  |
+3 |     let _copied = token.clone();
+  |                         ^^^^^ method not found in `WriteToken`

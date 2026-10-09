@@ -16,7 +16,7 @@ mod version;
 
 pub use discover::{
     adb_version, candidate_directories, directories_with_tools, evaluate_installation,
-    DiscoverRequest, ToolBinaryNames, ToolsReport,
+    fastboot_version, DiscoverRequest, ToolBinaryNames, ToolInvoker, ToolOutput, ToolsReport,
 };
 pub use error::ToolsError;
 pub use hashutil::{sha1_bytes, sha256_bytes, sha256_file};
@@ -29,4 +29,4 @@ pub use server::{
     assess_server, parse_host_version, probe_adb_server, restart_adb_server, ServerObservation,
     ServerStatus, DEFAULT_ADB_PORT,
 };
-pub use version::{parse_adb_version_output, SdkVersion};
+pub use version::{parse_adb_version_output, parse_fastboot_version_output, SdkVersion};

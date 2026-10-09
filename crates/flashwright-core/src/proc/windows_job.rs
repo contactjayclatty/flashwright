@@ -16,7 +16,7 @@ use windows::Win32::System::JobObjects::{
 };
 use windows::Win32::System::Threading::IO_COUNTERS;
 
-use crate::ProcError;
+use crate::proc::ProcError;
 
 pub(crate) struct JobGuard {
     handle: HANDLE,

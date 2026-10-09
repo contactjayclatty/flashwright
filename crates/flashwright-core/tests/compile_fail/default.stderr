@@ -1,0 +1,5 @@
+error[E0599]: no function or associated item named `default` found for struct `WriteToken` in the current scope
+ --> tests/compile_fail/default.rs:2:48
+  |
+2 |     let _token = flashwright_core::WriteToken::default();
+  |                                                ^^^^^^^ function or associated item not found in `WriteToken`

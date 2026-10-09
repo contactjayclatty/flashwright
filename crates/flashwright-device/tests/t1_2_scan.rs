@@ -20,6 +20,9 @@ async fn t1_2_scan_states() {
         &runner,
         "\
 serial-device device product:shiba model:Pixel_8 device:shiba transport_id:7
+serial-adb device product:shiba transport_id:8
+serial-authz authorizing
+serial-adb-np no permissions
 serial-unauth unauthorized
 serial-off offline
 serial-rec recovery
@@ -45,6 +48,9 @@ serial-device fastboot
             .unwrap_or_else(|| panic!("missing {serial}"))
             .mode
     };
+    assert_eq!(mode("serial-adb"), Mode::Adb);
+    assert_eq!(mode("serial-authz"), Mode::Authorizing);
+    assert_eq!(mode("serial-adb-np"), Mode::NoPermissions);
     assert_eq!(mode("serial-unauth"), Mode::Unauthorized);
     assert_eq!(mode("serial-off"), Mode::Offline);
     assert_eq!(mode("serial-rec"), Mode::Recovery);

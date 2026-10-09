@@ -1,0 +1,9 @@
+error[E0382]: use of moved value: `token`
+ --> tests/compile_fail/copy_use_after_move.rs:4:18
+  |
+2 | fn reject_copy(token: flashwright_core::WriteToken) {
+  |                ----- move occurs because `token` has type `WriteToken`, which does not implement the `Copy` trait
+3 |     let _moved = token;
+  |                  ----- value moved here
+4 |     let _again = token;
+  |                  ^^^^^ value used here after move

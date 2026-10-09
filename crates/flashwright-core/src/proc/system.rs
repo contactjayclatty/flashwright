@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Clatty Works
 
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
 
-use crate::lines::{push_capped, tail_of, LineAssembler};
-use crate::{CommandRunner, Invocation, ProcError, ProcessGroup, RunResult, StdStream};
+use crate::proc::lines::{push_capped, tail_of, LineAssembler};
+use crate::proc::spawn;
+use crate::proc::{CommandRunner, Invocation, ProcError, ProcessGroup, RunResult, StdStream};
 
 /// Spawns real processes with `tokio::process::Command` and an argument vector.
 #[derive(Debug, Default, Clone, Copy)]
@@ -16,12 +18,23 @@ pub struct SystemRunner;
 impl CommandRunner for SystemRunner {
     async fn run(&self, invocation: Invocation) -> Result<RunResult, ProcError> {
         invocation.validate()?;
+        let verified = crate::exe::host_utility(&invocation.program)?;
         let started = Instant::now();
-        let mut command = Command::new(&invocation.program);
+        let mut command = spawn::command_for(&verified);
+        let tools_dir = verified
+            .path()
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
         command
             .args(&invocation.args)
             .env_remove("ANDROID_SERIAL")
+            .env_remove("ADB_VENDOR_KEYS")
+            .env_remove("ANDROID_ADB_SERVER_ADDRESS")
+            .env_remove("ANDROID_ADB_SERVER_PORT")
             .env("ANDROID_PRODUCT_OUT", "")
+            .env("PATH", path_with_tools(&tools_dir))
+            .current_dir(&tools_dir)
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -55,7 +68,7 @@ impl CommandRunner for SystemRunner {
 
         #[cfg(windows)]
         let _job = if invocation.group == ProcessGroup::TiedToParent {
-            Some(crate::windows_job::assign(&child)?)
+            Some(crate::proc::windows_job::assign(&child)?)
         } else {
             None
         };
@@ -174,13 +187,26 @@ impl CommandRunner for SystemRunner {
     }
 }
 
+fn path_with_tools(tools_dir: &Path) -> OsString {
+    let system = if cfg!(windows) {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
+        PathBuf::from(root).join("System32")
+    } else {
+        PathBuf::from("/usr/bin")
+    };
+    let mut path = OsString::from(tools_dir);
+    path.push(if cfg!(windows) { ";" } else { ":" });
+    path.push(system.as_os_str());
+    path
+}
+
 async fn read_chunk<R: AsyncRead + Unpin>(pipe: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
     pipe.read(buf).await
 }
 
 async fn kill_child(child: &mut tokio::process::Child) {
     #[cfg(unix)]
-    crate::unix_kill::kill_group(child.id());
+    crate::proc::unix_kill::kill_group(child.id());
     let _ = child.start_kill();
     let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
 }

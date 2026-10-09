@@ -52,6 +52,7 @@ pub struct AllowEntry {
     pub adb_sha256: String,
     pub fastboot_sha256: String,
     pub dll_sha256s: BTreeMap<String, String>,
+    pub parser_profile: String,
 }
 
 #[derive(Clone, Debug)]
@@ -164,8 +165,16 @@ pub fn classify(
     if let Some(entry) = policy
         .allow
         .iter()
-        .find(|entry| entry.version.triple() == version.triple() && entry.device_tested)
+        .find(|entry| entry.version.triple() == version.triple())
     {
+        if !entry.device_tested || entry.adb_sha256.is_empty() || entry.fastboot_sha256.is_empty() {
+            return ToolsVerdict::ScanOnly {
+                version: version.clone(),
+                notice: format!(
+                    "Platform-tools {version} is on the allow list but has not passed a device test. Scan and read only."
+                ),
+            };
+        }
         if hashes_match(entry, files, host) {
             return ToolsVerdict::Allowed {
                 version: version.clone(),
@@ -252,11 +261,13 @@ impl AllowEntry {
             adb_sha256: file.adb_sha256,
             fastboot_sha256: file.fastboot_sha256,
             dll_sha256s: file.dll_sha256s,
+            parser_profile: file.parser_profile,
         })
     }
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PolicyFile {
     block: BlockFile,
     #[serde(default)]
@@ -266,6 +277,7 @@ struct PolicyFile {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BlockFile {
     below: String,
     #[serde(default)]
@@ -275,12 +287,14 @@ struct BlockFile {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RangeFile {
     from: String,
     to: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExactFile {
     version: String,
     #[serde(default = "yes")]
@@ -289,6 +303,7 @@ struct ExactFile {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AllowFile {
     version: String,
     zip_sha1: String,
@@ -300,6 +315,8 @@ struct AllowFile {
     fastboot_sha256: String,
     #[serde(default)]
     dll_sha256s: BTreeMap<String, String>,
+    #[serde(default)]
+    parser_profile: String,
 }
 
 fn yes() -> bool {

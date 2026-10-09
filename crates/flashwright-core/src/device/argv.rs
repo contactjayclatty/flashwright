@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use crate::{DeviceError, Partition, Slot};
+use crate::device::{DeviceError, Partition, Slot};
 
 pub fn devices_long() -> Vec<String> {
     vec!["devices".into(), "-l".into()]
@@ -17,12 +17,6 @@ pub fn with_serial(serial: &str, tail: &[&str]) -> Vec<String> {
     args.push("-s".into());
     args.push(serial.into());
     args.extend(tail.iter().map(|part| (*part).to_string()));
-    args
-}
-
-pub fn shell(serial: &str, remote: &[String]) -> Vec<String> {
-    let mut args = vec!["-s".into(), serial.into(), "shell".into()];
-    args.extend(remote.iter().cloned());
     args
 }
 

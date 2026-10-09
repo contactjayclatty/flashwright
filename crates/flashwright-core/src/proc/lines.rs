@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use crate::StdStream;
+use crate::proc::StdStream;
 
 /// One decoded line from a child stream. Separators are `\n` and `\r`.
 #[derive(Clone, Debug, PartialEq, Eq)]

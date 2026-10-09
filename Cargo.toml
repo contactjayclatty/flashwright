@@ -7,6 +7,8 @@ members = [
     "crates/flashwright-winusb",
     "crates/flashwright-core",
     "crates/flashwright-wizard",
+    "crates/flashwright-plan",
+    "crates/flashwright-magisk",
     "apps/flashwright-gui/src-tauri",
     "xtask",
 ]
@@ -17,7 +19,7 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 authors = ["Clatty Works"]
 repository = "https://github.com/contactjayclatty/flashwright"
-rust-version = "1.85"
+rust-version = "1.88"
 publish = false
 
 [workspace.dependencies]
@@ -25,12 +27,18 @@ tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "process", 
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 # Kept at 0.8.23 so the window shell's older parser crates stay beside it.
-toml = "0.8.23"
+toml = "=0.8.23"
 sha2 = "0.10"
 sha1 = "0.10"
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tracing = "0.1"
 libc = "0.2"
+serde_json = "1"
+serde_jcs = "0.1"
+uuid = { version = "=1.11.0", features = ["v7", "serde"] }
+proptest = "1"
+trybuild = "1"
+syn = { version = "2", features = ["full", "visit"] }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",

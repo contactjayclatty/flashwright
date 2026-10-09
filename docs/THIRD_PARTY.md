@@ -24,6 +24,9 @@ Versions are the ones resolved in `Cargo.lock` on 9 Oct 2026.
 | tracing | 0.1.44 | MIT |
 | libc | 0.2.190 | MIT OR Apache-2.0 |
 | windows | 0.62.2 | MIT OR Apache-2.0 |
+| serde_json | 1.0.151 | MIT OR Apache-2.0 |
+| serde_jcs | 0.1.0 | MIT OR Apache-2.0 |
+| uuid | 1.11.0 | Apache-2.0 OR MIT |
 
 `zip` is built with `deflate-flate2-zlib-rs` only.
 
@@ -35,7 +38,7 @@ Versions are the ones resolved in `Cargo.lock` on 9 Oct 2026.
 | serde_json 1.0.151 | https://github.com/serde-rs/json | MIT OR Apache-2.0 | `crates/flashwright-wizard` |
 | serde_jcs 0.1.0 | https://github.com/l1h3r/serde_jcs | MIT OR Apache-2.0 | Plan canonicalisation |
 | sha2 0.10.9, hex 0.4.3 | RustCrypto | MIT OR Apache-2.0 | Plan digest |
-| uuid 1.27.0 | https://github.com/uuid-rs/uuid | MIT OR Apache-2.0 | Plan ids |
+| uuid 1.11.0 | https://github.com/uuid-rs/uuid | MIT OR Apache-2.0 | Plan ids |
 | IBM Plex Sans and IBM Plex Mono | https://github.com/IBM/plex `763c36ef9117782905ae010056dfbe8fd2653a25` | SIL OFL-1.1 | `apps/flashwright-gui/ui/theme/fonts` |
 | Vite 6.4.4 | https://github.com/vitejs/vite | MIT | Wizard bundle |
 | TypeScript | https://github.com/microsoft/TypeScript | Apache-2.0 | Wizard typecheck |

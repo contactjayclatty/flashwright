@@ -76,22 +76,22 @@ pub fn script_adb_probe(
 ) {
     runner.on(
         adb_name(),
-        &["-s", serial, "shell", "getprop"],
+        &["-s", serial, "shell", "'getprop'"],
         ScriptedResponse::ok(props),
     );
     runner.on(
         adb_name(),
-        &["-s", serial, "shell", "su", "-c", "id"],
+        &["-s", serial, "shell", "'su' '-c' 'id'"],
         ScriptedResponse::ok(su),
     );
     runner.on(
         adb_name(),
-        &["-s", serial, "shell", "magisk", "-v"],
+        &["-s", serial, "shell", "'su' '-c' \"'magisk' '-v'\""],
         ScriptedResponse::ok("27.0\n"),
     );
     runner.on(
         adb_name(),
-        &["-s", serial, "shell", "magisk", "-V"],
+        &["-s", serial, "shell", "'su' '-c' \"'magisk' '-V'\""],
         ScriptedResponse::ok("27000\n"),
     );
     runner.on(
@@ -100,15 +100,13 @@ pub fn script_adb_probe(
             "-s",
             serial,
             "shell",
-            "dumpsys",
-            "package",
-            "com.topjohnwu.magisk",
+            "'dumpsys' 'package' 'com.topjohnwu.magisk'",
         ],
         ScriptedResponse::ok("    versionName=27.0\n    versionCode=27000 minSdk=26\n"),
     );
     runner.on(
         adb_name(),
-        &["-s", serial, "shell", "dumpsys", "battery"],
+        &["-s", serial, "shell", "'dumpsys' 'battery'"],
         ScriptedResponse::ok(
             "  level: 80\n  AC powered: false\n  USB powered: true\n  Wireless powered: false\n",
         ),
@@ -124,8 +122,7 @@ pub fn script_adb_probe(
             "-s",
             serial,
             "shell",
-            "ls",
-            "/dev/block/by-name/init_boot_a",
+            "'ls' '/dev/block/by-name/init_boot_a'",
         ],
         ls,
     );

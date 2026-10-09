@@ -12,9 +12,27 @@ pub fn is_forbidden_program(file_name: &str) -> bool {
     let stem = lower.strip_suffix(".exe").unwrap_or(lower.as_str());
     matches!(
         stem,
-        "cmd" | "command" | "powershell" | "pwsh" | "sh" | "bash" | "dash" | "zsh" | "fish"
+        "cmd"
+            | "command"
+            | "powershell"
+            | "pwsh"
+            | "sh"
+            | "bash"
+            | "dash"
+            | "zsh"
+            | "fish"
+            | "wscript"
+            | "cscript"
+            | "mshta"
+            | "ksh"
+            | "busybox"
+            | "toybox"
+            | "env"
+            | "wsl"
     ) || lower.ends_with(".bat")
         || lower.ends_with(".cmd")
+        || lower.ends_with(".ps1")
+        || lower.ends_with(".vbs")
 }
 
 #[cfg(test)]

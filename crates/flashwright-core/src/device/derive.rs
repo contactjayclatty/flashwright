@@ -8,10 +8,10 @@
 //! `ro.boot.verifiedbootstate == "orange"`. Fastboot `unlocked: yes` wins
 //! when the phone is in the bootloader.
 
-use flashwright_proc::RunResult;
+use crate::proc::RunResult;
 
-use crate::parse::PropMap;
-use crate::{LockState, RootState, Slot};
+use crate::device::parse::PropMap;
+use crate::device::{LockState, RootState, Slot};
 
 pub fn parse_slot(raw: &str) -> Option<Slot> {
     let trimmed = raw.trim();

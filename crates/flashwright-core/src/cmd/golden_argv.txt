@@ -1,0 +1,32 @@
+version adb version
+adb-devices adb devices | -l
+fastboot-devices fastboot devices | -l
+get-state adb -s | pixel1 | get-state
+pull-apk adb -s | pixel1 | pull | /data/app/~~abc==/com.topjohnwu.magisk-xyz/base.apk | base.apk
+pull-patched adb -s | pixel1 | pull | /data/local/tmp/flashwright/out/patched.img | patched.img
+getprop-all adb -s | pixel1 | shell | 'getprop'
+getprop-one adb -s | pixel1 | shell | 'getprop' 'ro.build.fingerprint'
+ls-init-boot adb -s | pixel1 | shell | 'ls' '/dev/block/by-name/init_boot_b'
+ls-work adb -s | pixel1 | shell | 'ls' '/data/local/tmp/flashwright'
+battery adb -s | pixel1 | shell | 'dumpsys' 'battery'
+diskstats adb -s | pixel1 | shell | 'dumpsys' 'diskstats'
+package adb -s | pixel1 | shell | 'dumpsys' 'package' 'com.topjohnwu.magisk'
+su-id adb -s | pixel1 | shell | 'su' '-c' 'id'
+magisk-v adb -s | pixel1 | shell | 'su' '-c' "'magisk' '-v'"
+magisk-code adb -s | pixel1 | shell | 'su' '-c' "'magisk' '-V'"
+ls-magisk adb -s | pixel1 | shell | 'su' '-c' "'ls' '/data/adb/magisk'"
+sha256-block adb -s | pixel1 | shell | 'su' '-c' "'sha256sum' '/dev/block/bootdevice/by-name/boot_a'"
+sha256-prefix adb -s | pixel1 | shell | 'su' '-c' "'head' '-c' '4096' '/dev/block/by-name/init_boot_b' | sha256sum"
+cat-block adb -s | pixel1 | exec-out | 'su' '-c' "'cat' '/dev/block/by-name/boot_a'"
+getvar-all fastboot -s | pixel1 | getvar | all
+getvar-slot fastboot -s | pixel1 | getvar | partition-size:init_boot_b
+push adb -s | pixel1 | push | /var/flashwright/init_boot.img | /data/local/tmp/flashwright/stock.img
+reboot-system adb -s | pixel1 | reboot
+reboot-bootloader fastboot -s | pixel1 | reboot | bootloader
+sideload adb -s | pixel1 | sideload | /var/flashwright/init_boot.img
+mkdir adb -s | pixel1 | shell | 'mkdir' '-p' '/data/local/tmp/flashwright/out'
+rm adb -s | pixel1 | shell | 'rm' '-rf' '/data/local/tmp/flashwright'
+patch-su adb -s | pixel1 | shell | 'su' '-c' "'sh' '/data/local/tmp/flashwright/fl_patch.sh'"
+flash fastboot -s | pixel1 | --slot | b | flash | init_boot | /var/flashwright/init_boot.img
+set-active fastboot -s | pixel1 | --set-active=b
+update fastboot -s | pixel1 | --slot | b | --skip-reboot | update | /var/flashwright/init_boot.img

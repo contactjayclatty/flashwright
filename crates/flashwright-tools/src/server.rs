@@ -10,10 +10,10 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
-use flashwright_proc::{CommandRunner, Invocation, ProcessGroup};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use crate::discover::ToolInvoker;
 use crate::version::SdkVersion;
 use crate::ToolsError;
 
@@ -23,6 +23,7 @@ pub const DEFAULT_ADB_PORT: u16 = 5037;
 pub struct ServerObservation {
     pub listening: bool,
     pub protocol: Option<u32>,
+    pub server_version: Option<SdkVersion>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +35,29 @@ pub struct ServerStatus {
 
 pub fn assess_server(client: &SdkVersion, observation: &ServerObservation) -> ServerStatus {
     if !observation.listening {
+        return ServerStatus {
+            client_version: client.clone(),
+            needs_restart_confirmation: false,
+            message: None,
+        };
+    }
+    if let Some(server) = &observation.server_version {
+        if server.triple() == client.triple() {
+            return ServerStatus {
+                client_version: client.clone(),
+                needs_restart_confirmation: false,
+                message: None,
+            };
+        }
+        return ServerStatus {
+            client_version: client.clone(),
+            needs_restart_confirmation: true,
+            message: Some(format!(
+                "Another adb is running (version {server}). Flashwright will restart it."
+            )),
+        };
+    }
+    if observation.protocol == Some(41) {
         return ServerStatus {
             client_version: client.clone(),
             needs_restart_confirmation: false,
@@ -60,12 +84,14 @@ pub async fn probe_adb_server(port: u16) -> ServerObservation {
         return ServerObservation {
             listening: false,
             protocol: None,
+            server_version: None,
         };
     };
     if stream.write_all(b"000chost:version").await.is_err() {
         return ServerObservation {
             listening: true,
             protocol: None,
+            server_version: None,
         };
     }
     let mut buf = [0u8; 64];
@@ -74,12 +100,14 @@ pub async fn probe_adb_server(port: u16) -> ServerObservation {
         return ServerObservation {
             listening: true,
             protocol: None,
+            server_version: None,
         };
     };
     let text = String::from_utf8_lossy(&buf[..count]);
     ServerObservation {
         listening: true,
         protocol: parse_host_version(&text),
+        server_version: None,
     }
 }
 
@@ -96,7 +124,7 @@ pub fn parse_host_version(text: &str) -> Option<u32> {
 /// `kill-server` then `start-server`. `start-server` is detached.
 ///
 /// Returns [`ToolsError::RestartNotConfirmed`] unless the user agreed.
-pub async fn restart_adb_server<R: CommandRunner>(
+pub async fn restart_adb_server<R: ToolInvoker>(
     runner: &R,
     adb: &Path,
     user_confirmed: bool,
@@ -104,30 +132,14 @@ pub async fn restart_adb_server<R: CommandRunner>(
     if !user_confirmed {
         return Err(ToolsError::RestartNotConfirmed);
     }
-    let kill = runner
-        .run(Invocation {
-            program: adb.to_path_buf(),
-            args: vec!["kill-server".into()],
-            timeout: Duration::from_secs(15),
-            watchdog: None,
-            group: ProcessGroup::TiedToParent,
-        })
-        .await?;
-    if !kill.success_exit() {
+    let kill = runner.invoke(adb, &["kill-server".into()], false).await?;
+    if !kill.ok {
         return Err(ToolsError::Version {
             detail: format!("adb kill-server exited {:?}", kill.exit_code),
         });
     }
-    let start = runner
-        .run(Invocation {
-            program: adb.to_path_buf(),
-            args: vec!["start-server".into()],
-            timeout: Duration::from_secs(15),
-            watchdog: None,
-            group: ProcessGroup::Detached,
-        })
-        .await?;
-    if !start.success_exit() {
+    let start = runner.invoke(adb, &["start-server".into()], true).await?;
+    if !start.ok {
         return Err(ToolsError::Version {
             detail: format!("adb start-server exited {:?}", start.exit_code),
         });

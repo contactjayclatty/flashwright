@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{Battery, Mode, ScanEntry};
+use crate::device::{Battery, Mode, ScanEntry};
 
 pub type PropMap = BTreeMap<String, String>;
 
@@ -16,6 +16,7 @@ pub fn parse_mode_token(token: &str) -> Option<Mode> {
         "fastboot" => Some(Mode::Fastboot),
         "fastbootd" => Some(Mode::Fastbootd),
         "unauthorized" => Some(Mode::Unauthorized),
+        "authorizing" => Some(Mode::Authorizing),
         "offline" => Some(Mode::Offline),
         _ => None,
     }
@@ -28,16 +29,25 @@ pub fn parse_adb_devices(text: &str) -> Vec<ScanEntry> {
         if line.is_empty() || line.starts_with("List of devices") || line.starts_with('*') {
             continue;
         }
-        let mut parts = line.split_whitespace();
-        let Some(serial) = parts.next() else {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() {
             continue;
+        }
+        let serial = parts[0];
+        let (mode, raw, rest) = if parts.len() >= 3 && parts[1] == "no" && parts[2] == "permissions"
+        {
+            (
+                Mode::NoPermissions,
+                "no permissions".to_string(),
+                &parts[3..],
+            )
+        } else {
+            let state = parts.get(1).copied().unwrap_or("");
+            let mode = parse_mode_token(state).unwrap_or(Mode::Unrecognized);
+            (mode, state.to_string(), &parts[2..])
         };
-        let Some(state) = parts.next() else {
-            continue;
-        };
-        let mode = parse_mode_token(state).unwrap_or(Mode::Unrecognized);
         let mut transport_id = None;
-        for extra in parts {
+        for extra in rest {
             if let Some(value) = extra.strip_prefix("transport_id:") {
                 transport_id = Some(value.to_string());
             }
@@ -46,7 +56,7 @@ pub fn parse_adb_devices(text: &str) -> Vec<ScanEntry> {
             serial: serial.to_string(),
             mode,
             transport_id,
-            raw_state: state.to_string(),
+            raw_state: raw,
         });
     }
     out

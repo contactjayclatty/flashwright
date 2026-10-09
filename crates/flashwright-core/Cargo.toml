@@ -10,9 +10,25 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-flashwright-device = { path = "../flashwright-device" }
-flashwright-proc = { path = "../flashwright-proc" }
 flashwright-tools = { path = "../flashwright-tools" }
 flashwright-winusb = { path = "../flashwright-winusb" }
 tokio.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_jcs.workspace = true
+toml.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+trybuild.workspace = true
+proptest.workspace = true
