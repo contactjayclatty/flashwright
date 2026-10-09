@@ -419,6 +419,9 @@ function firmwareView(model: ShellModel): HTMLElement {
       facts.append(el("dt", {}, [term]), el("dd", {}, [value]));
     }
     wrap.append(facts);
+    const patch = el("button", { class: "fw-btn", type: "button", "data-action": "prepare-patch" });
+    patch.textContent = "Patch on your phone";
+    wrap.append(patch);
   }
   return wrap;
 }

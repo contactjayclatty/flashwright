@@ -127,6 +127,7 @@ export class MockEngine implements EngineApi {
   private actionChosen = false;
   private route: Route = "ota";
   private preferDryRun = true;
+  private planKind = "update_keep_root";
   private firmwareName = "";
   private firmwareOk = false;
   private notice: Notice | null = null;
@@ -274,11 +275,10 @@ export class MockEngine implements EngineApi {
       this.notice = { level: "block", message: "Check a package before preparing a patch.", gates: [] };
       return this.snapshot();
     }
-    this.notice = {
-      level: "info",
-      message: "Patch on your phone? Nothing is flashed until you confirm a plan.",
-      gates: [],
-    };
+    this.phase = "review";
+    this.planKind = "prepare_patch";
+    this.preferDryRun = false;
+    this.notice = null;
     return this.snapshot();
   }
 
@@ -421,6 +421,7 @@ export class MockEngine implements EngineApi {
       return this.snapshot();
     }
     this.phase = "review";
+    this.planKind = "update_keep_root";
     this.job = idleJob();
     this.notice = null;
     return this.snapshot();
@@ -532,6 +533,8 @@ export class MockEngine implements EngineApi {
       gates: passGates(),
       steps: otaSteps(this.firmwareName || FIXTURE_OTA_NAME),
       prefer_dry_run: this.preferDryRun,
+      kind: this.planKind,
+      dry_run: false,
     };
   }
 

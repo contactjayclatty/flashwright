@@ -192,6 +192,25 @@ try {
     throw new Error("Alt+F started a flash before Flash now was armed");
   }
 
+  await page.keyboard.press("Escape");
+  await page.locator("[role='alertdialog']").waitFor({ state: "detached" });
+  await page.locator("[data-action='back']").click();
+  await page.locator("[data-phase='firmware']").waitFor();
+  await page.locator("[data-action='prepare-patch']").click();
+  await page.locator("[role='alertdialog']").waitFor();
+  await page.waitForFunction(() => document.activeElement?.getAttribute("data-action") === "cancel-dialog");
+  const patchTitle = await page.locator("#confirm-title").innerText();
+  if (patchTitle !== "Patch on your phone?") {
+    throw new Error(`unexpected patch title: ${patchTitle}`);
+  }
+  if (await page.locator("[data-action='confirm-patch']").isDisabled()) {
+    throw new Error("Patch now was delayed");
+  }
+  const shortcut = await page.locator("[data-action='confirm-patch']").getAttribute("aria-keyshortcuts");
+  if (shortcut !== "Alt+P") {
+    throw new Error(`Patch now shortcut is ${shortcut ?? "missing"}`);
+  }
+
   const scaled = await browser.newPage({ viewport: { width: 1024, height: 680 }, deviceScaleFactor: 1.5 });
   await reachReview(scaled);
   await openFlash(scaled);

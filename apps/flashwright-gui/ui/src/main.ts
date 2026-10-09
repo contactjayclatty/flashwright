@@ -315,8 +315,23 @@ class Wizard {
           await this.refresh(this.engine.dryRun(this.snap.plan.plan_hash));
         }
         break;
+      case "prepare-patch":
+        if (this.snap.firmware) {
+          await this.refresh(this.engine.preparePatch(this.snap.firmware.id));
+          if (this.snap?.plan?.kind === "prepare_patch") {
+            this.openConfirm(true);
+          }
+        }
+        break;
       case "flash":
         this.openConfirm(this.snap.plan?.kind === "prepare_patch");
+        break;
+      case "confirm-patch":
+        if (this.snap.plan && Date.now() >= this.confirmUntil) {
+          const hash = this.snap.plan.plan_hash;
+          this.confirmOpen = false;
+          await this.refresh(this.engine.confirmAndRun(hash));
+        }
         break;
       case "confirm-run":
         if (this.snap.plan && Date.now() >= this.confirmUntil) {
