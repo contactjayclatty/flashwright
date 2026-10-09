@@ -7,6 +7,8 @@
 //! crate. A blocked platform-tools build is refused before any device
 //! command runs.
 
+pub use flashwright_firmware as firmware;
+
 pub mod cmd;
 pub mod device;
 pub mod exe;
@@ -225,5 +227,15 @@ fn verdict_label(verdict: &ToolsVerdict) -> &'static str {
         "scan only"
     } else {
         "blocked"
+    }
+}
+
+#[cfg(test)]
+mod firmware_export {
+    #[test]
+    fn firmware_api_is_reexported() {
+        let workers = crate::firmware::extraction_workers();
+        assert!(workers >= 1);
+        assert!(workers <= 4);
     }
 }

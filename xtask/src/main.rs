@@ -47,6 +47,7 @@ fn check(root: &Path) -> Result<(), String> {
     if !license.contains("GNU AFFERO GENERAL PUBLIC LICENSE") {
         return Err("LICENSE is missing the GNU AGPL heading".into());
     }
+    check_update_metadata(root)?;
     Ok(())
 }
 
@@ -205,6 +206,126 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn check_update_metadata(root: &Path) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+
+    let proto_path = root.join("third_party/aosp/update_engine/update_metadata.proto");
+    let bytes = fs::read(&proto_path).map_err(|err| err.to_string())?;
+    let digest = Sha256::digest(&bytes);
+    let encoded: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    const EXPECTED: &str = "09da1556e3edb9197ca88103b22ea07230a634c004605d4aa1efee6a6ed6e60d";
+    if encoded != EXPECTED {
+        return Err("update_metadata.proto does not match the recorded AOSP checksum".into());
+    }
+    let provenance =
+        fs::read_to_string(root.join("third_party/aosp/update_engine/PROVENANCE.toml"))
+            .map_err(|err| err.to_string())?;
+    if !provenance.contains(EXPECTED)
+        || !provenance.contains("dc84c2552b2d4cf00d2a843cb1c091d99d0499f1")
+    {
+        return Err("PROVENANCE.toml does not record the AOSP proto commit".into());
+    }
+    let dumper = fs::read_to_string(
+        root.join("third_party/payload-dumper-rust/proto/update_metadata.proto"),
+    )
+    .map_err(|err| err.to_string())?;
+    let aosp = String::from_utf8(bytes).map_err(|err| err.to_string())?;
+    if !zstd_only_delta(&aosp, &dumper) {
+        return Err(
+            "payload-dumper proto differs from the AOSP proto by more than ZSTD = 14".into(),
+        );
+    }
+    let license = fs::read_to_string(root.join("third_party/payload-dumper-rust/LICENSE"))
+        .map_err(|err| err.to_string())?;
+    if !license.contains("Apache License") {
+        return Err("payload-dumper-rust LICENSE is missing the Apache heading".into());
+    }
+    if !root.join("third_party/aosp/update_engine/NOTICE").is_file() {
+        return Err("AOSP update_engine NOTICE is missing".into());
+    }
+    if !root.join("third_party/aosp/avb/NOTICE").is_file() {
+        return Err("AOSP avb NOTICE is missing".into());
+    }
+    Ok(())
+}
+
+fn zstd_only_delta(aosp: &str, dumper: &str) -> bool {
+    let left = proto_tokens(aosp);
+    let mut right = proto_tokens(dumper);
+    let Some(at) = right.windows(4).position(|window| {
+        window[0] == "ZSTD" && window[1] == "=" && window[2] == "14" && window[3] == ";"
+    }) else {
+        return false;
+    };
+    right.drain(at..at + 4);
+    left == right
+}
+
+fn proto_tokens(input: &str) -> Vec<String> {
+    let stripped = strip_proto_comments(input);
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in stripped.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            current.push(ch);
+        } else {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            if !ch.is_whitespace() {
+                tokens.push(ch.to_string());
+            }
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn strip_proto_comments(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'/') {
+            index += 2;
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+            continue;
+        }
+        if chars[index] == '"' {
+            out.push('"');
+            index += 1;
+            while index < chars.len() && chars[index] != '"' {
+                out.push(chars[index]);
+                if chars[index] == '\\' && index + 1 < chars.len() {
+                    index += 1;
+                    out.push(chars[index]);
+                }
+                index += 1;
+            }
+            if index < chars.len() {
+                out.push('"');
+                index += 1;
+            }
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
 }
 
 #[cfg(test)]

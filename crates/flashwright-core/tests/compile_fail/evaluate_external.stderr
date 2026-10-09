@@ -7,5 +7,5 @@ error[E0603]: function `evaluate` is private
 note: the function `evaluate` is defined here
  --> src/safety/mod.rs
   |
-  | pub(crate) use evaluate::{evaluate, evaluate_acked, evaluate_step, FactEvidence, SafetyFacts};
+  | pub(crate) use evaluate::{evaluate, evaluate_acked, FactEvidence, SafetyFacts};
   |                           ^^^^^^^^

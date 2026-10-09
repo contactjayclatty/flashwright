@@ -61,7 +61,7 @@
 
 ## Status
 
-Safety checks run before a patch or a flash. They cover the phone, the factory image, the security patch, Magisk, the bootloader, and the slot. A dry run prints WOULD RUN or WOULD BLOCK and does not write. Stock init_boot is read, stored with a SHA-256, and compared with the factory image. A mismatch stops the job. The LU0 and FIPS regions are refused. This build uses sample phones and does not write to a device.
+A Pixel factory package or a full OTA package can be opened. Flashwright extracts init_boot, or boot on older phones, and checks the package hash. Safety checks run before a patch or a flash. They cover the phone, the factory image, the security patch, Magisk, the bootloader, and the slot. A dry run prints WOULD RUN or WOULD BLOCK and does not write. Stock init_boot is read, stored with a SHA-256, and compared with the factory image. A mismatch stops the job. The LU0 and FIPS regions are refused. This build uses sample phones and does not write to a device.
 
 ## Features
 
