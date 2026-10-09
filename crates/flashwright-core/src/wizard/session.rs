@@ -311,6 +311,7 @@ impl<R: CommandRunner> WizardSession<R> {
         if self.used.contains(&hash) {
             return Err(rejected("That plan was already used."));
         }
+        let files = input_files(&request);
         let preview = PlanPreview {
             plan_code: plan_code(&hash),
             plan_hash: hash.clone(),
@@ -331,7 +332,7 @@ impl<R: CommandRunner> WizardSession<R> {
             backup,
             timeouts,
             acks,
-            files: input_files(&request),
+            files,
             life: PlanLife::Issued,
         });
         self.safety = Some(facts);

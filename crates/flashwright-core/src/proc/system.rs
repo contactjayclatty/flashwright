@@ -206,10 +206,7 @@ impl CommandRunner for SystemRunner {
     }
 }
 
-fn child_command(
-    exe: &VerifiedExe,
-    args: &[String],
-) -> Result<tokio::process::Command, ProcError> {
+fn child_command(exe: &VerifiedExe, args: &[String]) -> Result<tokio::process::Command, ProcError> {
     #[cfg(all(test, unix))]
     if let Some(log) = spawn::exec_trace() {
         let strace = if Path::new("/usr/bin/strace").is_file() {
