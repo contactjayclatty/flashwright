@@ -36,7 +36,7 @@ jobs:
         with:
           toolchain: nightly
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --version 0.13.2 --locked
+        run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
       - name: C++ toolchain for libFuzzer
         run: |
           sudo apt-get update
@@ -45,4 +45,4 @@ jobs:
           sudo update-alternatives --set c++ /usr/bin/g++
       - name: Fuzz the boot image parser
         working-directory: crates/flashwright-bootimg
-        run: cargo fuzz run inspect -- -max_total_time=15 -rss_limit_mb=512
+        run: cargo +nightly fuzz run inspect -- -max_total_time=15 -rss_limit_mb=512
