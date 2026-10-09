@@ -9,6 +9,7 @@
 //! It mints a write token internally. A second call with the same plan fails
 //! because the plan has been consumed.
 
+use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -23,7 +24,8 @@ use crate::CoreError;
 pub const PLAN_SCHEMA: &str = "flashwright.plan.v1";
 
 /// Window phases. Only [`Phase::Review`] may confirm or dry-run a plan.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Phase {
     Connect,
     Choose,
@@ -117,6 +119,7 @@ pub struct WizardSession<R: CommandRunner> {
     phase: Phase,
     clock: Box<dyn Clock>,
     held: Option<HeldPlan>,
+    consumed: BTreeSet<String>,
     transport: PlatformToolsTransport<R>,
 }
 
@@ -130,6 +133,7 @@ impl<R: CommandRunner> WizardSession<R> {
             phase: Phase::Connect,
             clock,
             held: None,
+            consumed: BTreeSet::new(),
             transport,
         }
     }
@@ -196,9 +200,14 @@ impl<R: CommandRunner> WizardSession<R> {
     pub async fn confirm_and_run(&mut self, plan_hash_value: &str) -> Result<RunReport, CoreError> {
         let dry_run = self.ready(plan_hash_value)?.dry_run;
         if dry_run {
-            return Err(rejected("A dry-run plan does not write."));
+            return Err(CoreError::DryRunPlan);
         }
-        let held = self.held.take().expect("review plan");
+        let held = self
+            .held
+            .take()
+            .expect("review plan");
+        // Mark the plan used before step 1. A second call returns AlreadyUsed.
+        self.consumed.insert(held.hash.clone());
         self.phase = Phase::Flash;
         let writes: Vec<WriteCmd> = held
             .steps
@@ -243,16 +252,18 @@ impl<R: CommandRunner> WizardSession<R> {
 
 impl<R: CommandRunner> WizardSession<R> {
     fn ready(&self, plan_hash_value: &str) -> Result<&HeldPlan, CoreError> {
+        if self.consumed.contains(plan_hash_value) {
+            return Err(CoreError::AlreadyUsed);
+        }
         if self.phase != Phase::Review {
-            let reason = if matches!(self.phase, Phase::Done | Phase::Flash | Phase::Recovery) {
-                "That plan was already used."
+            return Err(if matches!(self.phase, Phase::Done | Phase::Flash | Phase::Recovery) {
+                CoreError::AlreadyUsed
             } else {
-                "A plan can only be confirmed from the review step."
-            };
-            return Err(rejected(reason));
+                CoreError::WrongState
+            });
         }
         let Some(held) = self.held.as_ref() else {
-            return Err(rejected("That plan was already used."));
+            return Err(CoreError::AlreadyUsed);
         };
         if held.hash != plan_hash_value {
             return Err(rejected("That plan code was not issued by Flashwright."));

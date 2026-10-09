@@ -9,7 +9,14 @@ repository.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+# Sample phones and fixture checksums. Release builds leave this out of the
+# binary unless debug assertions are also on.
+mock = []
+
 [dependencies]
+flashwright-plan = { path = "../flashwright-plan" }
 flashwright-tools = { path = "../flashwright-tools" }
 flashwright-winusb = { path = "../flashwright-winusb" }
 tokio.workspace = true

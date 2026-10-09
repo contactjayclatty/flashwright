@@ -16,6 +16,9 @@ pub mod timeouts;
 pub mod token;
 pub mod wizard;
 
+#[cfg(any(test, all(feature = "mock", debug_assertions)))]
+pub mod mock;
+
 mod invoke;
 
 pub use serde;
@@ -71,6 +74,21 @@ pub enum CoreError {
 
     #[error("{reason}")]
     Rejected { reason: String },
+
+    #[error("That plan was already used.")]
+    AlreadyUsed,
+
+    #[error("A plan can only be confirmed from the review step.")]
+    WrongState,
+
+    #[error("That plan was discarded. Build it again.")]
+    Discarded,
+
+    #[error("A dry-run plan does not write.")]
+    DryRunPlan,
+
+    #[error("That plan is not a dry run.")]
+    NotDryRun,
 }
 
 /// Minimal events for a later UI. `v` is the payload version.
