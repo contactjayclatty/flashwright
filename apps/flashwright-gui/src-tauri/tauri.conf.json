@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Flashwright",
+  "version": "0.1.0",
+  "identifier": "works.clatty.flashwright",
+  "build": {
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeDevCommand": {
+      "script": "node build-ui.mjs dev",
+      "cwd": ".",
+      "wait": false
+    },
+    "beforeBuildCommand": {
+      "script": "node build-ui.mjs build",
+      "cwd": "."
+    },
+    "features": ["gui"]
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Flashwright",
+        "width": 1024,
+        "height": 680,
+        "minWidth": 1024,
+        "minHeight": 640,
+        "decorations": false,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

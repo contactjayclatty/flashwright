@@ -1,0 +1,56 @@
+/* Layout additions for the wizard shell. Colours stay in the skin tokens. */
+html,
+body,
+#app,
+.fw-app,
+.fw-window {
+  height: 100%;
+  margin: 0;
+}
+.fw-window {
+  min-height: 0;
+}
+.fw-wizard__banner {
+  overflow: auto;
+}
+.fw-key {
+  text-decoration: none;
+}
+.fw-alt .fw-key {
+  text-decoration: underline;
+}
+.fw-choice:has(input:disabled) {
+  cursor: default;
+}
+.fw-choice:has(input:disabled) strong,
+.fw-choice:has(input:disabled) small {
+  color: var(--fw-ink-disabled);
+}
+.fw-scroll {
+  max-height: 168px;
+  overflow: auto;
+}
+.fw-log-line {
+  height: 20px;
+  overflow: hidden;
+  white-space: pre;
+}
+.fw-console {
+  height: 140px;
+}
+button.fw-list__row,
+button.fw-choice {
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+button.fw-list__row {
+  background: transparent;
+  border: 0;
+}
+.fw-app[data-theme="dark"] .fw-wizard__banner,
+.fw-app[data-theme="dark"] .fw-steps li {
+  color: var(--fw-title-ink);
+}

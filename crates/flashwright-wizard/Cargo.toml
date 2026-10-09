@@ -1,0 +1,19 @@
+[package]
+name = "flashwright-wizard"
+description = "Update wizard engine. Sample phones only. No device I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+hex = "0.4"
+serde.workspace = true
+serde_jcs = "0.1"
+serde_json = "1"
+sha2.workspace = true
+thiserror.workspace = true
+uuid = { version = "1", features = ["serde"] }

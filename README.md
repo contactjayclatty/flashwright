@@ -59,6 +59,8 @@
 
 <p align="center">Expert mode keeps extra controls within reach.</p>
 
+<p align="center">This build uses sample phones and does not write to a device.</p>
+
 ## The wizard
 
 <table>
