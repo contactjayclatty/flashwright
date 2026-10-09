@@ -1204,6 +1204,7 @@ name = "flashwright-core"
 version = "0.1.0"
 dependencies = [
  "flashwright-firmware",
+ "flashwright-plan",
  "flashwright-tools",
  "flashwright-winusb",
  "libc",
@@ -1253,7 +1254,7 @@ dependencies = [
 name = "flashwright-gui"
 version = "0.1.0"
 dependencies = [
- "flashwright-wizard",
+ "flashwright-core",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -1273,6 +1274,7 @@ name = "flashwright-plan"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_jcs",
  "sha2 0.10.9",
  "thiserror 2.0.21",
 ]
@@ -1306,19 +1308,6 @@ dependencies = [
  "thiserror 2.0.21",
  "toml 0.8.23",
  "windows",
-]
-
-[[package]]
-name = "flashwright-wizard"
-version = "0.1.0"
-dependencies = [
- "hex",
- "serde",
- "serde_jcs",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.21",
- "uuid",
 ]
 
 [[package]]

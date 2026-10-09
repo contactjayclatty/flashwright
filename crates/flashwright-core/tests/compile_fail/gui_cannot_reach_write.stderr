@@ -1,0 +1,40 @@
+error[E0603]: function `mint_confirmed` is private
+ --> tests/compile_fail/gui_cannot_reach_write.rs:2:42
+  |
+2 |     let _mint = flashwright_core::token::mint_confirmed("", "", &[]);
+  |                                          ^^^^^^^^^^^^^^ private function
+  |
+note: the function `mint_confirmed` is defined here
+ --> src/token.rs
+  |
+  | / pub(crate) fn mint_confirmed(
+  | |     plan_hash: &str,
+  | |     serial: &str,
+  | |     steps: &[WriteCmd],
+  | | ) -> (ConfirmedPlan, WriteToken) {
+  | |________________________________^
+
+error[E0624]: method `run_write` is private
+  --> tests/compile_fail/gui_cannot_reach_write.rs:10:28
+   |
+10 |       let _write = transport.run_write(loop {}, loop {});
+   |                              ^^^^^^^^^ private method
+   |
+  ::: src/device/transport.rs
+   |
+   | /     pub(crate) async fn run_write(
+   | |         &self,
+   | |         token: &WriteToken,
+   | |         cmd: crate::cmd::WriteCmd,
+   | |     ) -> Result<RunResult, DeviceError> {
+   | |_______________________________________- private method defined here
+
+warning: unreachable expression
+  --> tests/compile_fail/gui_cannot_reach_write.rs:10:47
+   |
+10 |     let _write = transport.run_write(loop {}, loop {});
+   |                                      -------  ^^^^^^^ unreachable expression
+   |                                      |
+   |                                      any code following this expression is unreachable
+   |
+   = note: `#[warn(unreachable_code)]` on by default

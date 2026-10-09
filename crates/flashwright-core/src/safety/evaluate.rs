@@ -142,6 +142,15 @@ pub fn evaluate(
         .collect()
 }
 
+/// Evaluate the safety gates for one step. Call this before that step is written.
+pub fn evaluate_step(
+    step: &PlanStep,
+    facts: Option<&SafetyFacts>,
+    backup: Option<&BackupState>,
+) -> Vec<GateDecision> {
+    evaluate(std::slice::from_ref(step), facts, backup)
+}
+
 pub fn blocking(decisions: &[GateDecision]) -> Vec<GateBlock> {
     decisions
         .iter()
