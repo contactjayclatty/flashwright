@@ -12,6 +12,7 @@ pub mod device;
 pub mod exe;
 pub mod parse;
 pub mod proc;
+pub mod safety;
 pub mod timeouts;
 pub mod token;
 pub mod wizard;

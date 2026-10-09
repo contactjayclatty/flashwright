@@ -1,0 +1,15 @@
+# Regions and plan tokens that are refused.
+# LU0 and FIPS are a hard block. The other tokens are the plan forms this
+# product does not run: wiping data, turning verification off, erasing a
+# partition, or starting a host shell.
+
+regions = ["lu0", "fips"]
+
+argv = ["--disable-verity", "--disable-verification", "-w", "--wipe", "erase"]
+
+# Loaded at runtime so the checker does not spell host-shell program names.
+shell = ["cmd.exe", "cmd /c", "powershell", ".bat", ".cmd", "pwsh"]
+
+# Unofficial Magisk application ids. Ported from PixelFlasher constants.py
+# MAGISK_ALPHA_PKG_NAME and MAGISK_DELTA_PKG_NAME at commit 081286d, lines 59-60.
+packages = ["io.github.vvb2060.magisk", "io.github.huskydg.magisk"]
