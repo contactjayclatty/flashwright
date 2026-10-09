@@ -506,6 +506,44 @@ async fn sideload_post_state_reads_stderr() {
         .unwrap();
 }
 
+#[test]
+fn a_changed_library_fails_the_tool_gate() {
+    let dir = std::env::temp_dir().join(format!(
+        "flashwright-dll-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let adb_path = dir.join(adb_name());
+    let fastboot_path = dir.join(fastboot_name());
+    let dll = dir.join("AdbWinApi.dll");
+    std::fs::write(&adb_path, b"adb-bytes").unwrap();
+    std::fs::write(&fastboot_path, b"fastboot-bytes").unwrap();
+    std::fs::write(&dll, b"dll-v1").unwrap();
+    let adb = platform_tool(&adb_path, &sha256_file(&adb_path)).unwrap();
+    let fastboot = platform_tool(&fastboot_path, &sha256_file(&fastboot_path)).unwrap();
+    let listener = ListenerImage {
+        path: adb_path.clone(),
+        sha256: sha256_file(&adb_path),
+    };
+    let transport = PlatformToolsTransport::new(
+        Arc::new(ScriptedRunner::new()),
+        adb_path,
+        fastboot_path,
+        TransportConfig::for_tests(),
+    );
+    transport.install_verified(adb, fastboot, Some(listener));
+    let (_installed, matched, _server) = transport.tool_gate();
+    assert!(matched);
+    std::fs::write(&dll, b"dll-v2").unwrap();
+    let (_installed, matched, _server) = transport.tool_gate();
+    assert!(!matched);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn sha256_file(path: &std::path::Path) -> String {
     use std::io::Read;
     let mut file = std::fs::File::open(path).unwrap();

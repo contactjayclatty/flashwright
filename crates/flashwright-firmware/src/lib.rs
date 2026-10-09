@@ -22,6 +22,8 @@ mod ziputil;
 #[cfg(test)]
 mod tests;
 
+pub use bootimg::{read_boot_image, synthetic_boot, BootInfo};
 pub use error::FirmwareError;
 pub use open::{extraction_workers, open_package, OpenRequest, OpenedPackage, PackageKind};
 pub use select::StockPartition;
+pub use ziputil::windows_flash_name;

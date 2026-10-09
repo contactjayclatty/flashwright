@@ -117,14 +117,7 @@ pub async fn capture_stock<R: CommandRunner>(
         ));
     }
     let serial_sha256 = sha256_hex(serial.as_str().as_bytes());
-    let set_id = sha256_hex(
-        format!(
-            "{serial_sha256}:{}:{}:4",
-            slot.as_str(),
-            partition.fastboot_name()
-        )
-        .as_bytes(),
-    );
+    let set_id = new_set_id(&serial_sha256, slot, partition)?;
     let partial = dest.join(format!("{set_id}.partial"));
     if partial.exists() {
         fs::remove_dir_all(&partial).map_err(|err| block("G14", err.to_string()))?;
@@ -291,10 +284,7 @@ fn finish_set(
     };
     let body = serde_json::to_vec_pretty(&manifest).map_err(|err| block("G14", err.to_string()))?;
     fs::write(partial.join("manifest.json"), &body).map_err(|err| block("G14", err.to_string()))?;
-    let final_dir = dest.join(&set_id);
-    if final_dir.exists() {
-        fs::remove_dir_all(&final_dir).map_err(|err| block("G14", err.to_string()))?;
-    }
+    let final_dir = claim_backup_dir(dest, &set_id)?;
     fs::rename(&partial, &final_dir).map_err(|err| block("G14", err.to_string()))?;
     Ok(BackupSet {
         set_id,
@@ -304,6 +294,76 @@ fn finish_set(
         partition,
         dir: final_dir,
     })
+}
+
+fn new_set_id(serial_sha256: &str, slot: Slot, partition: Partition) -> Result<String, GateBlock> {
+    let mut nonce = [0u8; 8];
+    fill_random(&mut nonce)?;
+    Ok(sha256_hex(
+        format!(
+            "{serial_sha256}:{}:{}:{}",
+            slot.as_str(),
+            partition.fastboot_name(),
+            hex_bytes(&nonce)
+        )
+        .as_bytes(),
+    ))
+}
+
+fn claim_backup_dir(dest: &Path, set_id: &str) -> Result<PathBuf, GateBlock> {
+    let final_dir = dest.join(set_id);
+    if final_dir.exists() {
+        return Err(block(
+            "G14",
+            "A stock backup already exists and will not be replaced.",
+        ));
+    }
+    Ok(final_dir)
+}
+
+fn fill_random(buf: &mut [u8]) -> Result<(), GateBlock> {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let mut file = fs::File::open("/dev/urandom")
+            .map_err(|err| block("G14", format!("The backup id could not be drawn: {err}")))?;
+        file.read_exact(buf)
+            .map_err(|err| block("G14", format!("The backup id could not be drawn: {err}")))?;
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        #[link(name = "bcrypt")]
+        extern "system" {
+            fn BCryptGenRandom(
+                algorithm: *mut std::ffi::c_void,
+                buffer: *mut u8,
+                length: u32,
+                flags: u32,
+            ) -> i32;
+        }
+        // SAFETY: `buf` is a writable byte slice. Flag 0x2 is BCRYPT_USE_SYSTEM_PREFERRED_RNG.
+        let status = unsafe {
+            BCryptGenRandom(
+                std::ptr::null_mut(),
+                buf.as_mut_ptr(),
+                u32::try_from(buf.len()).unwrap_or(u32::MAX),
+                0x0000_0002,
+            )
+        };
+        if status != 0 {
+            return Err(block("G14", "The backup id could not be drawn."));
+        }
+        Ok(())
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
 
 fn write_chunks(path: &Path, bytes: &[u8]) -> Result<(String, String), GateBlock> {
@@ -538,5 +598,41 @@ mod tests {
     fn catalogue_cap_rejects_an_oversized_length() {
         assert!(!over_catalogue_cap(MAX_BLOCK_LEN));
         assert!(over_catalogue_cap(MAX_BLOCK_LEN + 1));
+    }
+
+    #[test]
+    fn an_existing_backup_directory_is_left_in_place() {
+        let dest =
+            std::env::temp_dir().join(format!("flashwright-backup-keep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dest);
+        let dir = dest.join("fixed-set");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("marker"), b"keep").unwrap();
+        let err = claim_backup_dir(&dest, "fixed-set").unwrap_err();
+        assert!(err.reason.contains("will not be replaced"));
+        assert_eq!(fs::read(dir.join("marker")).unwrap(), b"keep");
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[tokio::test]
+    async fn a_second_backup_keeps_the_first_and_uses_a_new_id() {
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.on_fn(adb_name(), &["-s", "synth-komodo-1"], |call, _hit| {
+            answer(call)
+        });
+        let transport = scripted(Arc::clone(&runner));
+        let dest =
+            std::env::temp_dir().join(format!("flashwright-backup-second-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dest);
+        let first = capture_stock(&transport, &serial(), Slot::B, Partition::InitBoot, &dest)
+            .await
+            .unwrap();
+        fs::write(first.dir.join("marker"), b"keep").unwrap();
+        let second = capture_stock(&transport, &serial(), Slot::B, Partition::InitBoot, &dest)
+            .await
+            .unwrap();
+        assert_ne!(first.set_id, second.set_id);
+        assert_eq!(fs::read(first.dir.join("marker")).unwrap(), b"keep");
+        let _ = fs::remove_dir_all(&dest);
     }
 }

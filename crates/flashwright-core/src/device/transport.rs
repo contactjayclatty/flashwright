@@ -50,6 +50,7 @@ struct VerifiedTools {
     adb: VerifiedExe,
     fastboot: VerifiedExe,
     listener: Option<crate::exe::ListenerImage>,
+    libraries: Vec<(PathBuf, String)>,
 }
 
 impl<R: CommandRunner> Clone for PlatformToolsTransport<R> {
@@ -100,10 +101,12 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         fastboot: VerifiedExe,
         listener: Option<crate::exe::ListenerImage>,
     ) {
+        let libraries = sibling_libraries(&[adb.path(), fastboot.path()]);
         *self.verified.lock().expect("verified tools") = Some(VerifiedTools {
             adb,
             fastboot,
             listener,
+            libraries,
         });
     }
 
@@ -131,16 +134,10 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         let Some(tools) = guard.as_ref() else {
             return (false, false, false);
         };
-        let paths = vec![
-            tools.adb.path().to_path_buf(),
-            tools.fastboot.path().to_path_buf(),
-        ];
+        let paths = locked_tool_paths(tools);
         let unchanged = match crate::exe::SharedReadLocks::hold(&paths) {
             Ok(mut locks) => match locks.hashes() {
-                Ok(hashes) => {
-                    hashes.first().map(String::as_str) == Some(tools.adb.sha256())
-                        && hashes.get(1).map(String::as_str) == Some(tools.fastboot.sha256())
-                }
+                Ok(hashes) => tool_hashes_match(&hashes, tools),
                 Err(_) => false,
             },
             Err(_) => false,
@@ -211,18 +208,13 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
                 "G21 blocked: no verified platform-tools are installed".into(),
             ));
         };
-        let paths = vec![
-            tools.adb.path().to_path_buf(),
-            tools.fastboot.path().to_path_buf(),
-        ];
+        let paths = locked_tool_paths(tools);
         let mut locks =
             SharedReadLocks::hold(&paths).map_err(|err| DeviceError::Message(err.to_string()))?;
         let hashes = locks
             .hashes()
             .map_err(|err| DeviceError::Message(err.to_string()))?;
-        if hashes.first().map(String::as_str) != Some(tools.adb.sha256())
-            || hashes.get(1).map(String::as_str) != Some(tools.fastboot.sha256())
-        {
+        if !tool_hashes_match(&hashes, tools) {
             return Err(DeviceError::Message(
                 "platform-tools changed on disk before the write".into(),
             ));
@@ -1071,4 +1063,70 @@ fn write_size(cmd: &crate::cmd::WriteCmd) -> u64 {
         },
         _ => 0,
     }
+}
+
+const LIBRARY_NAMES: &[&str] = &["AdbWinApi.dll", "AdbWinUsbApi.dll"];
+
+fn sibling_libraries(exes: &[&Path]) -> Vec<(PathBuf, String)> {
+    let mut found = Vec::new();
+    for exe in exes {
+        let Some(dir) = exe.parent() else {
+            continue;
+        };
+        for name in LIBRARY_NAMES {
+            let path = dir.join(name);
+            if !path.is_file() || found.iter().any(|(existing, _)| existing == &path) {
+                continue;
+            }
+            if let Some(hash) = hash_path(&path) {
+                found.push((path, hash));
+            }
+        }
+    }
+    found.sort_by(|left, right| left.0.cmp(&right.0));
+    found
+}
+
+fn locked_tool_paths(tools: &VerifiedTools) -> Vec<PathBuf> {
+    let mut paths = vec![
+        tools.adb.path().to_path_buf(),
+        tools.fastboot.path().to_path_buf(),
+    ];
+    for (path, _) in &tools.libraries {
+        paths.push(path.clone());
+    }
+    paths
+}
+
+fn tool_hashes_match(hashes: &[String], tools: &VerifiedTools) -> bool {
+    hashes.first().map(String::as_str) == Some(tools.adb.sha256())
+        && hashes.get(1).map(String::as_str) == Some(tools.fastboot.sha256())
+        && tools
+            .libraries
+            .iter()
+            .enumerate()
+            .all(|(index, (_, expected))| {
+                hashes.get(index + 2).map(String::as_str) == Some(expected.as_str())
+            })
+}
+
+fn hash_path(path: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buf).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    Some(hex)
 }
