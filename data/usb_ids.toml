@@ -1,0 +1,28 @@
+# Google USB ids used to classify a Windows device node.
+# The hardware-id and interface mapping is unverified until a
+# SetupAPI capture from a test phone is recorded. These PIDs are the public
+# Google ids commonly seen for adb and the bootloader.
+
+[[vid]]
+vid = "18D1"
+note = "Google"
+
+[[pid]]
+vid = "18D1"
+pid = "4EE7"
+interface = "adb"
+
+[[pid]]
+vid = "18D1"
+pid = "4EE2"
+interface = "adb"
+
+[[pid]]
+vid = "18D1"
+pid = "4EE0"
+interface = "bootloader"
+
+[[pid]]
+vid = "18D1"
+pid = "D00D"
+interface = "bootloader"

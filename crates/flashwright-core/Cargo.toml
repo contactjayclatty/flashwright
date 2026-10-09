@@ -1,0 +1,18 @@
+[package]
+name = "flashwright-core"
+description = "Session façade over platform-tools, the device transport, and the USB probe."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+flashwright-device = { path = "../flashwright-device" }
+flashwright-proc = { path = "../flashwright-proc" }
+flashwright-tools = { path = "../flashwright-tools" }
+flashwright-winusb = { path = "../flashwright-winusb" }
+tokio.workspace = true
+thiserror.workspace = true

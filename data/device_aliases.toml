@@ -1,0 +1,8 @@
+# Codename aliases used when comparing a phone with a firmware package.
+# Upstream issue 325 names the watch pair aurora/eos. Which spelling
+# firmware uses as the canonical id is still open, so both spellings map to
+# aurora and therefore compare equal. This table is not a copy of an upstream file.
+
+[[group]]
+canonical = "aurora"
+aliases = ["eos"]

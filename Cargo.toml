@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/flashwright-proc",
+    "crates/flashwright-tools",
+    "crates/flashwright-device",
+    "crates/flashwright-winusb",
+    "crates/flashwright-core",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+authors = ["Clatty Works"]
+repository = "https://github.com/contactjayclatty/flashwright"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "net"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+sha2 = "0.10"
+sha1 = "0.10"
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+tracing = "0.1"
+libc = "0.2"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_Devices_DeviceAndDriverInstallation",
+] }

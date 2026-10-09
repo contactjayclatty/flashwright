@@ -1,0 +1,4 @@
+# Gate G19 schema. The upstream minimum-bootloader table was not copied.
+# The meaning of that table is still unverified, so nothing here blocks a flash.
+
+entries = []

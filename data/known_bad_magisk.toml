@@ -1,0 +1,4 @@
+# Gate G10 schema. The upstream known-bad list was not copied.
+# Codes are added only after an independent check. Empty in M1.
+
+version_codes = []

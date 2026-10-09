@@ -1,0 +1,23 @@
+[package]
+name = "flashwright-tools"
+description = "Platform-tools discovery, allow/block list, and adb server handling."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+flashwright-proc = { path = "../flashwright-proc" }
+tokio.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+toml.workspace = true
+sha2.workspace = true
+sha1.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+zip.workspace = true
