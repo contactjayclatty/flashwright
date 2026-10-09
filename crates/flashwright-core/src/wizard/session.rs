@@ -1192,7 +1192,17 @@ fn hash_file(path: &Path) -> Option<String> {
         }
         hasher.update(&buf[..read]);
     }
-    Some(safety::sha256_hex(&hasher.finalize()))
+    Some(hex_digest(hasher.finalize().as_slice()))
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    out
 }
 
 fn empty_facts() -> SafetyFacts {
