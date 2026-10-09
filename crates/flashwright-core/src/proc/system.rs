@@ -7,27 +7,40 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+use crate::cmd::CatalogueCommand;
+use crate::exe::VerifiedExe;
 use crate::proc::lines::{push_capped, tail_of, LineAssembler};
 use crate::proc::spawn;
-use crate::proc::{CommandRunner, Invocation, ProcError, ProcessGroup, RunResult, StdStream};
+use crate::proc::{CommandRunner, ProcError, ProcessGroup, RunLimits, RunResult, StdStream};
 
 /// Spawns real processes with `tokio::process::Command` and an argument vector.
+///
+/// The executable must be a measured or allow-listed adb or fastboot. The
+/// argument vector is a catalogue command.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemRunner;
 
 impl CommandRunner for SystemRunner {
-    async fn run(&self, invocation: Invocation) -> Result<RunResult, ProcError> {
-        invocation.validate()?;
-        let verified = crate::exe::host_utility(&invocation.program)?;
-        spawn::note_spawn(verified.path(), &invocation.args);
+    async fn run(
+        &self,
+        exe: &VerifiedExe,
+        command: &CatalogueCommand,
+        limits: RunLimits,
+    ) -> Result<RunResult, ProcError> {
+        if !exe.admits_system_spawn() {
+            return Err(ProcError::Unverified {
+                detail: "only a resolved adb or fastboot may run".into(),
+            });
+        }
+        spawn::note_spawn(exe.path(), command.args());
         let started = Instant::now();
-        let mut command = child_command(&verified, &invocation.args)?;
-        let tools_dir = verified
+        let mut child_cmd = child_command(exe, command.args())?;
+        let tools_dir = exe
             .path()
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        command
+        child_cmd
             .env_remove("ANDROID_SERIAL")
             .env_remove("ADB_VENDOR_KEYS")
             .env_remove("ANDROID_ADB_SERVER_ADDRESS")
@@ -43,16 +56,16 @@ impl CommandRunner for SystemRunner {
         #[cfg(windows)]
         {
             // CREATE_NO_WINDOW. Avoids a console flash for each adb/fastboot call.
-            command.creation_flags(0x0800_0000);
+            child_cmd.creation_flags(0x0800_0000);
         }
 
-        if invocation.group == ProcessGroup::TiedToParent {
+        if command.group() == ProcessGroup::TiedToParent {
             #[cfg(unix)]
             {
                 // SAFETY: setpgid in the child, before exec, is the documented
                 // pre_exec use. The closure does not allocate or touch Rust state.
                 unsafe {
-                    command.pre_exec(|| {
+                    child_cmd.pre_exec(|| {
                         if libc::setpgid(0, 0) != 0 {
                             return Err(std::io::Error::last_os_error());
                         }
@@ -62,12 +75,12 @@ impl CommandRunner for SystemRunner {
             }
         }
 
-        let mut child = command
+        let mut child = child_cmd
             .spawn()
-            .map_err(|source| ProcError::spawn(&invocation.program, source))?;
+            .map_err(|source| ProcError::spawn(exe.path(), source))?;
 
         #[cfg(windows)]
-        let _job = if invocation.group == ProcessGroup::TiedToParent {
+        let _job = if command.group() == ProcessGroup::TiedToParent {
             Some(crate::proc::windows_job::assign(&child)?)
         } else {
             None
@@ -90,6 +103,7 @@ impl CommandRunner for SystemRunner {
         let mut stdout_open = true;
         let mut stderr_open = true;
         let mut last_output = Instant::now();
+        let mut saw_percent = false;
         let mut timed_out = false;
         let mut killed_by_watchdog = false;
         let mut exit_code = None;
@@ -103,15 +117,14 @@ impl CommandRunner for SystemRunner {
                 break;
             }
 
-            let overall_left = invocation.timeout.saturating_sub(started.elapsed());
+            let overall_left = limits.timeout.saturating_sub(started.elapsed());
             if overall_left.is_zero() {
                 timed_out = true;
                 kill_child(&mut child).await;
                 break;
             }
-            let watchdog_left = invocation
-                .watchdog
-                .map(|window| window.saturating_sub(last_output.elapsed()));
+            let quiet = quiet_window(&limits, saw_percent);
+            let watchdog_left = quiet.map(|window| window.saturating_sub(last_output.elapsed()));
             if matches!(watchdog_left, Some(left) if left.is_zero()) {
                 killed_by_watchdog = true;
                 kill_child(&mut child).await;
@@ -131,6 +144,9 @@ impl CommandRunner for SystemRunner {
                             let chunk = &scratch_out[..n];
                             push_capped(&mut out_buf, chunk, &mut out_trunc);
                             lines.push(StdStream::Stdout, chunk, started.elapsed());
+                            if chunk_has_percent(chunk) {
+                                saw_percent = true;
+                            }
                             last_output = Instant::now();
                         }
                         Err(_) => stdout_open = false,
@@ -143,13 +159,16 @@ impl CommandRunner for SystemRunner {
                             let chunk = &scratch_err[..n];
                             push_capped(&mut err_buf, chunk, &mut err_trunc);
                             lines.push(StdStream::Stderr, chunk, started.elapsed());
+                            if chunk_has_percent(chunk) {
+                                saw_percent = true;
+                            }
                             last_output = Instant::now();
                         }
                         Err(_) => stderr_open = false,
                     }
                 }
                 _ = tokio::time::sleep(sleep_for) => {
-                    if invocation.timeout.saturating_sub(started.elapsed()).is_zero() {
+                    if limits.timeout.saturating_sub(started.elapsed()).is_zero() {
                         timed_out = true;
                     } else {
                         killed_by_watchdog = true;
@@ -175,8 +194,8 @@ impl CommandRunner for SystemRunner {
             killed_by_watchdog,
         };
         tracing::info!(
-            program = %invocation.program.display(),
-            args = ?invocation.args,
+            program = %exe.path().display(),
+            args = ?command.args(),
             exit = ?result.exit_code,
             duration_ms = result.duration.as_millis() as u64,
             timed_out = result.timed_out,
@@ -188,27 +207,46 @@ impl CommandRunner for SystemRunner {
 }
 
 fn child_command(
-    verified: &crate::exe::VerifiedExe,
+    exe: &VerifiedExe,
     args: &[String],
-) -> Result<tokio::process::Command, crate::proc::ProcError> {
+) -> Result<tokio::process::Command, ProcError> {
     #[cfg(all(test, unix))]
     if let Some(log) = spawn::exec_trace() {
-        let strace = crate::exe::host_utility(Path::new("/usr/bin/strace"))
-            .or_else(|_| crate::exe::host_utility(Path::new("/bin/strace")))?;
-        let mut command = spawn::command_for(&strace);
+        let strace = if Path::new("/usr/bin/strace").is_file() {
+            Path::new("/usr/bin/strace")
+        } else {
+            Path::new("/bin/strace")
+        };
+        let mut command = spawn::command(strace.as_os_str());
         command
             .arg("-e")
             .arg("trace=execve")
             .arg("-o")
             .arg(log)
             .arg("--")
-            .arg(verified.path())
+            .arg(exe.path())
             .args(args);
         return Ok(command);
     }
-    let mut command = spawn::command_for(verified);
+    let mut command = spawn::command_for(exe);
     command.args(args);
     Ok(command)
+}
+
+fn quiet_window(limits: &RunLimits, saw_percent: bool) -> Option<Duration> {
+    if saw_percent {
+        limits.finalising.or(limits.watchdog)
+    } else {
+        limits.watchdog
+    }
+}
+
+fn chunk_has_percent(chunk: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(chunk);
+    let Some(start) = text.find("(~") else {
+        return false;
+    };
+    text[start..].contains("%)")
 }
 
 fn path_with_tools(tools_dir: &Path) -> OsString {
@@ -228,6 +266,133 @@ async fn read_chunk<R: AsyncRead + Unpin>(pipe: &mut R, buf: &mut [u8]) -> std::
     pipe.read(buf).await
 }
 
+#[cfg(all(test, unix))]
+mod runner_tests {
+    use std::os::unix::fs::symlink;
+    use std::time::{Duration, Instant};
+
+    use crate::cmd::{CatalogueCommand, Tool};
+    use crate::exe::{measure_platform_tool, scripted_tool};
+    use crate::proc::{CommandRunner, RunLimits, SystemRunner};
+
+    fn limits(
+        timeout: Duration,
+        watchdog: Option<Duration>,
+        finalising: Option<Duration>,
+    ) -> RunLimits {
+        RunLimits {
+            timeout,
+            watchdog,
+            finalising,
+        }
+    }
+
+    #[tokio::test]
+    async fn measured_copies_obey_the_timeout_and_the_watchdog() {
+        let dir = std::env::temp_dir().join(format!("fw-runner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let echo = dir.join("adb");
+        std::fs::copy("/bin/echo", &echo).unwrap();
+        let exe = measure_platform_tool(&echo).unwrap();
+        let runner = SystemRunner;
+        let echoed = runner
+            .run(
+                &exe,
+                &CatalogueCommand::for_test(Tool::Adb, vec!["hello".into()]),
+                limits(Duration::from_secs(5), None, None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(echoed.stdout_text().trim(), "hello");
+
+        let sleep_path = dir.join("fastboot");
+        std::fs::copy("/bin/sleep", &sleep_path).unwrap();
+        let sleep_exe = measure_platform_tool(&sleep_path).unwrap();
+        let started = Instant::now();
+        let timed = runner
+            .run(
+                &sleep_exe,
+                &CatalogueCommand::for_test(Tool::Fastboot, vec!["30".into()]),
+                limits(Duration::from_millis(200), None, None),
+            )
+            .await
+            .unwrap();
+        assert!(timed.timed_out);
+        assert!(started.elapsed() < Duration::from_secs(3));
+
+        let started = Instant::now();
+        let watched = runner
+            .run(
+                &sleep_exe,
+                &CatalogueCommand::for_test(Tool::Fastboot, vec!["30".into()]),
+                limits(
+                    Duration::from_secs(5),
+                    Some(Duration::from_millis(150)),
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(watched.killed_by_watchdog);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_percent_line_opens_the_finalising_window() {
+        let dir = std::env::temp_dir().join(format!("fw-final-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("adb");
+        std::fs::copy("/bin/sh", &program).unwrap();
+        let exe = measure_platform_tool(&program).unwrap();
+        let started = Instant::now();
+        let result = SystemRunner
+            .run(
+                &exe,
+                &CatalogueCommand::for_test(
+                    Tool::Adb,
+                    vec!["-c".into(), "echo '(~47%)'; exec sleep 30".into()],
+                ),
+                limits(
+                    Duration::from_secs(5),
+                    Some(Duration::from_millis(200)),
+                    Some(Duration::from_millis(1200)),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(result.killed_by_watchdog);
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        assert!(started.elapsed() < Duration::from_secs(4));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn interpreters_and_a_shell_symlink_are_refused() {
+        let dir = std::env::temp_dir().join(format!("fw-deny-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["adb-helper", "python3", "perl", "node"] {
+            let path = dir.join(name);
+            std::fs::write(&path, b"not-a-tool").unwrap();
+            assert!(measure_platform_tool(&path).is_err(), "{name}");
+            let scripted = scripted_tool(&path).unwrap();
+            let err = SystemRunner
+                .run(
+                    &scripted,
+                    &CatalogueCommand::for_test(Tool::Adb, vec!["version".into()]),
+                    limits(Duration::from_secs(1), None, None),
+                )
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("adb or fastboot"), "{name}");
+        }
+        let link = dir.join("adb");
+        symlink("/bin/sh", &link).unwrap();
+        assert!(measure_platform_tool(&link).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 async fn kill_child(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     crate::proc::unix_kill::kill_group(child.id());
@@ -240,7 +405,24 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::proc::{CommandRunner, Invocation};
+    use crate::cmd::{CatalogueCommand, Rendered, Tool};
+    use crate::exe::measure_platform_tool;
+    use crate::proc::CommandRunner;
+
+    fn limits() -> RunLimits {
+        RunLimits {
+            timeout: Duration::from_secs(10),
+            watchdog: None,
+            finalising: None,
+        }
+    }
+
+    fn command(args: Vec<String>) -> CatalogueCommand {
+        CatalogueCommand::from_rendered(Rendered {
+            tool: Tool::Adb,
+            args,
+        })
+    }
 
     #[cfg(unix)]
     struct ClearTrace;
@@ -265,6 +447,11 @@ mod tests {
             strace.is_file(),
             "strace is required for the spawn-log trace"
         );
+        let dir = std::env::temp_dir().join(format!("fw-trace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("adb");
+        std::fs::copy("/bin/echo", &program).unwrap();
+        let exe = measure_platform_tool(&program).unwrap();
         let log = std::env::temp_dir().join(format!(
             "flashwright-strace-{}-{}",
             std::process::id(),
@@ -278,28 +465,26 @@ mod tests {
         spawn::set_exec_trace(Some(log.clone()));
         let _clear = ClearTrace;
         let result = SystemRunner
-            .run(Invocation::tied(
-                "/bin/echo",
-                vec!["hello-trace".into()],
-                Duration::from_secs(10),
-            ))
+            .run(&exe, &command(vec!["hello-trace".into()]), limits())
             .await
             .expect("echo");
         assert!(result.success_exit());
         assert!(result.stdout_text().contains("hello-trace"));
+        let shown = program.display().to_string();
         let recorded = spawn::spawn_log();
         assert!(
-            recorded.iter().any(|(program, args)| {
-                program == "/bin/echo" && args.as_slice() == ["hello-trace".to_string()]
+            recorded.iter().any(|(path, args)| {
+                path == &shown && args.as_slice() == ["hello-trace".to_string()]
             }),
             "{recorded:?}"
         );
         let text = std::fs::read_to_string(&log).expect("strace log");
         assert!(
-            text.contains("execve") && text.contains("/bin/echo") && text.contains("hello-trace"),
+            text.contains("execve") && text.contains(&shown) && text.contains("hello-trace"),
             "{text}"
         );
         let _ = std::fs::remove_file(&log);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// T4.9. Windows does not attach ETW here. The spawn log still names the real child.
@@ -311,13 +496,14 @@ mod tests {
         );
         spawn::clear_spawn_log();
         let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-        let program = PathBuf::from(root).join("System32").join("where.exe");
+        let source = PathBuf::from(root).join("System32").join("where.exe");
+        let dir = std::env::temp_dir().join(format!("fw-trace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("adb.exe");
+        std::fs::copy(&source, &program).unwrap();
+        let exe = measure_platform_tool(&program).unwrap();
         let result = SystemRunner
-            .run(Invocation::tied(
-                &program,
-                vec!["where".into()],
-                Duration::from_secs(10),
-            ))
+            .run(&exe, &command(vec!["where".into()]), limits())
             .await
             .expect("where");
         assert!(result.success_exit());
@@ -329,5 +515,6 @@ mod tests {
             }),
             "{recorded:?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

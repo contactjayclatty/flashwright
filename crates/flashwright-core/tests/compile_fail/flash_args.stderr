@@ -1,0 +1,5 @@
+error[E0425]: cannot find value `flash_args` in module `flashwright_core::device`
+ --> tests/compile_fail/flash_args.rs:2:43
+  |
+2 |     let _args = flashwright_core::device::flash_args;
+  |                                           ^^^^^^^^^^ not found in `flashwright_core::device`

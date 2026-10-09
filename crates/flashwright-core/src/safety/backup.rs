@@ -413,7 +413,7 @@ mod tests {
         format!("rooted-{}-{}", partition.fastboot_name(), slot.as_str()).into_bytes()
     }
 
-    fn answer(call: &crate::proc::Invocation) -> ScriptedResponse {
+    fn answer(call: &crate::proc::RecordedCall) -> ScriptedResponse {
         let joined = call.args.join(" ");
         let partition = if joined.contains("vbmeta") {
             Partition::Vbmeta

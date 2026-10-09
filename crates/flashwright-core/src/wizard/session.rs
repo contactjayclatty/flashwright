@@ -193,7 +193,14 @@ struct HeldPlan {
     backup: Option<BackupSnap>,
     timeouts: Vec<TimeoutSnap>,
     acks: Vec<String>,
+    files: Vec<InputFile>,
     life: PlanLife,
+}
+
+#[derive(Clone)]
+struct InputFile {
+    path: String,
+    sha256: Option<String>,
 }
 
 /// Read, plan, and confirm session for a window.
@@ -324,6 +331,7 @@ impl<R: CommandRunner> WizardSession<R> {
             backup,
             timeouts,
             acks,
+            files: input_files(&request),
             life: PlanLife::Issued,
         });
         self.safety = Some(facts);
@@ -481,6 +489,12 @@ impl<R: CommandRunner> WizardSession<R> {
         let dry_run = self.held.as_ref().expect("plan").dry_run;
         if dry_run {
             return Err(rejected("A dry-run plan does not write."));
+        }
+        let files = self.held.as_ref().expect("plan").files.clone();
+        if !files_match(&files) {
+            let hash = self.held.as_ref().expect("plan").hash.clone();
+            self.discard(&hash);
+            return Err(rejected("An input file changed. Build the plan again."));
         }
         self.reprobe().await?;
         let steps = self.held.as_ref().expect("plan").steps.clone();
@@ -843,6 +857,7 @@ fn step_timeouts(steps: &[PlanStep]) -> Vec<TimeoutSnap> {
                         crate::timeouts::StepBudget {
                             timeout: std::time::Duration::from_secs(0),
                             watchdog: None,
+                            finalising: None,
                         },
                     )
                 }
@@ -962,6 +977,36 @@ fn image_path(step: &PlanStep) -> Option<&str> {
         })) => Some(image.path()),
         _ => None,
     }
+}
+
+fn input_files(request: &PlanRequest) -> Vec<InputFile> {
+    let mut files = Vec::new();
+    for step in &request.steps {
+        let Some(path) = image_path(step) else {
+            continue;
+        };
+        push_input(&mut files, path);
+    }
+    if !request.firmware.filename.is_empty() {
+        push_input(&mut files, &request.firmware.filename);
+    }
+    files
+}
+
+fn push_input(files: &mut Vec<InputFile>, path: &str) {
+    if files.iter().any(|file| file.path == path) {
+        return;
+    }
+    files.push(InputFile {
+        sha256: hash_file(Path::new(path)),
+        path: path.to_string(),
+    });
+}
+
+fn files_match(expected: &[InputFile]) -> bool {
+    expected
+        .iter()
+        .all(|file| hash_file(Path::new(&file.path)) == file.sha256)
 }
 
 fn hash_file(path: &Path) -> Option<String> {
@@ -1530,6 +1575,7 @@ mod tests {
                 sha256: adb_hash,
             }),
         );
+        transport.note_tools_verdict(true);
     }
 
     #[tokio::test]

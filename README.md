@@ -69,6 +69,8 @@ Sign-off: M5 PROVISIONAL (mocks only). T1.3, T1.11, and T4.15 stay blocked until
 
 Android, Google, and Pixel are trademarks of Google LLC. Magisk is a project by topjohnwu. They are named descriptively. Flashwright is not affiliated with or endorsed by them.
 
+Platform-tools are located and version-checked before a scan. Writes stay off until an allow-list entry has per-file hashes and has been device-tested. A confirmed plan is single-use: Flashwright re-checks the phone and the input files, then discards the plan if either has changed.
+
 ## The wizard
 
 <table>
