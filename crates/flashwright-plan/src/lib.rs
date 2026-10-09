@@ -376,6 +376,18 @@ pub fn plan_code(hash: &str) -> String {
     }
 }
 
+/// `DRY xxxx·xxxx` or `PLAN xxxx·xxxx`.
+pub fn plan_label(hash: &str, dry_run: bool) -> String {
+    let prefix = if dry_run { "DRY" } else { "PLAN" };
+    format!("{prefix} {}", plan_code(hash))
+}
+
+/// SHA-256 over RFC 8785 canonical JSON, prefixed `flp1-`.
+pub fn canonical_hash<T: Serialize>(value: &T) -> Result<String, String> {
+    let bytes = serde_jcs::to_vec(value).map_err(|err| err.to_string())?;
+    Ok(plan_hash(&bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

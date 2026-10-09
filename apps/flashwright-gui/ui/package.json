@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
+    "test": "npm run build && node scripts/check-release-bundle.mjs && node scripts/keyboard.mjs",
     "screenshots": "node scripts/screenshots.mjs"
   },
   "dependencies": {

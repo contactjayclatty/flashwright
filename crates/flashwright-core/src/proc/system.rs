@@ -28,15 +28,15 @@ impl CommandRunner for SystemRunner {
         limits: RunLimits,
     ) -> Result<RunResult, ProcError> {
         crate::exe::recheck_allow_list(exe)?;
+        spawn::note_spawn(exe.path(), command.args());
         let started = Instant::now();
-        let mut child_cmd = spawn::command_for(exe);
+        let mut child_cmd = spawn::child_command(exe, command.args())?;
         let tools_dir = exe
             .path()
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
         child_cmd
-            .args(command.args())
             .env_remove("ANDROID_SERIAL")
             .env_remove("ADB_VENDOR_KEYS")
             .env_remove("ANDROID_ADB_SERVER_ADDRESS")
@@ -451,4 +451,132 @@ async fn kill_child(child: &mut tokio::process::Child) {
     crate::proc::unix_kill::kill_group(child.id());
     let _ = child.start_kill();
     let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::cmd::{CatalogueCommand, Rendered, Tool};
+    use crate::exe::{platform_tool, VerifiedExe};
+    use crate::proc::CommandRunner;
+
+    fn allow_listed_copy(path: &Path) -> VerifiedExe {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(std::fs::read(path).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        platform_tool(path, &hash).unwrap()
+    }
+
+    fn limits() -> RunLimits {
+        RunLimits {
+            timeout: Duration::from_secs(10),
+            watchdog: None,
+            finalising: None,
+        }
+    }
+
+    fn command(args: Vec<String>) -> CatalogueCommand {
+        CatalogueCommand::from_rendered(Rendered {
+            tool: Tool::Adb,
+            args,
+        })
+    }
+
+    #[cfg(unix)]
+    struct ClearTrace;
+
+    #[cfg(unix)]
+    impl Drop for ClearTrace {
+        fn drop(&mut self) {
+            spawn::set_exec_trace(None);
+        }
+    }
+
+    /// T4.9. Linux records the real `execve` with strace and checks it against the spawn log.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn spawn_log_matches_strace_execve() {
+        let strace = if Path::new("/usr/bin/strace").is_file() {
+            Path::new("/usr/bin/strace")
+        } else {
+            Path::new("/bin/strace")
+        };
+        assert!(
+            strace.is_file(),
+            "strace is required for the spawn-log trace"
+        );
+        let dir = std::env::temp_dir().join(format!("fw-trace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("adb");
+        std::fs::copy("/bin/echo", &program).unwrap();
+        let exe = allow_listed_copy(&program);
+        let log = std::env::temp_dir().join(format!(
+            "flashwright-strace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_file(&log);
+        spawn::clear_spawn_log();
+        spawn::set_exec_trace(Some(log.clone()));
+        let _clear = ClearTrace;
+        let result = SystemRunner
+            .run(&exe, &command(vec!["hello-trace".into()]), limits())
+            .await
+            .expect("echo");
+        assert!(result.success_exit());
+        assert!(result.stdout_text().contains("hello-trace"));
+        let shown = program.display().to_string();
+        let recorded = spawn::spawn_log();
+        assert!(
+            recorded.iter().any(|(path, args)| {
+                path == &shown && args.as_slice() == ["hello-trace".to_string()]
+            }),
+            "{recorded:?}"
+        );
+        let text = std::fs::read_to_string(&log).expect("strace log");
+        assert!(
+            text.contains("execve") && text.contains(&shown) && text.contains("hello-trace"),
+            "{text}"
+        );
+        let _ = std::fs::remove_file(&log);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T4.9. Windows does not attach ETW here. The spawn log still names the real child.
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn spawn_log_records_the_child_without_etw() {
+        eprintln!(
+            "T4.9: ETW process tracing is not wired on Windows. The spawn log records the program and arguments of the real child."
+        );
+        spawn::clear_spawn_log();
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let source = PathBuf::from(root).join("System32").join("where.exe");
+        let dir = std::env::temp_dir().join(format!("fw-trace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("adb.exe");
+        std::fs::copy(&source, &program).unwrap();
+        let exe = allow_listed_copy(&program);
+        let result = SystemRunner
+            .run(&exe, &command(vec!["where".into()]), limits())
+            .await
+            .expect("where");
+        assert!(result.success_exit());
+        let recorded = spawn::spawn_log();
+        let shown = program.display().to_string();
+        assert!(
+            recorded.iter().any(|(path, args)| {
+                path.eq_ignore_ascii_case(&shown) && args.as_slice() == ["where".to_string()]
+            }),
+            "{recorded:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

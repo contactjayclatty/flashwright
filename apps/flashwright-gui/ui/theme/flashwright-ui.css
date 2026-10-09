@@ -10,7 +10,7 @@
    ===================================================================== */
 
 :root {
-  /* brand palette (mirrors /brand/palette.css) */
+  /* brand palette */
   --cw-teal: #0F8A8A;
   --cw-teal-dark: #0A5C5C;
   --cw-panel: #D5D9DC;
@@ -364,11 +364,11 @@
   overflow: auto;
   white-space: pre-wrap;
 }
-.fw-console .t { color: var(--fw-lo); }                          /* timestamp: 4.5:1 on charcoal (AA) */
-.fw-console .p { color: var(--cw-amber); }                       /* prompt / command */
-.fw-console .ok { color: var(--cw-paper); background: var(--cw-teal-dark); padding: 0 4px; font-weight: 600; }
-.fw-console .warn { color: var(--cw-charcoal); background: var(--cw-amber); padding: 0 4px; font-weight: 600; }
-.fw-console .cur::after { content: ""; display: inline-block; width: .6em; height: 1.1em; vertical-align: -.2em; background: var(--fw-console-ink); }
+.fw-console .fw-log-time { color: var(--fw-lo); }
+.fw-console .fw-log-prompt { color: var(--cw-amber); }
+.fw-console .fw-log-ok { color: var(--cw-paper); background: var(--cw-teal-dark); padding: 0 4px; font-weight: 600; }
+.fw-console .fw-log-warn { color: var(--cw-charcoal); background: var(--cw-amber); padding: 0 4px; font-weight: 600; }
+.fw-console .fw-log-cursor::after { content: ""; display: inline-block; width: .6em; height: 1.1em; vertical-align: -.2em; background: var(--fw-console-ink); }
 
 /* ---------- callout ---------- */
 .fw-callout { display: flex; gap: 12px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--fw-outline); background: var(--fw-field); box-shadow: inset 4px 0 0 var(--fw-accent); }

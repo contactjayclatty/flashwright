@@ -13,6 +13,7 @@ export interface ShellModel {
   dryPreference: boolean;
   confirm: { secondsLeft: number; armed: boolean } | null;
   overlay: "none" | "backups" | "help";
+  stopAsk: boolean;
   localError: string | null;
   tauri: boolean;
 }
@@ -74,7 +75,7 @@ function phaseLede(phase: Phase): string {
     case "connect":
       return "Scan, then pick one authorised phone in the normal device state.";
     case "choose":
-      return "This version updates the phone and keeps the on-device root tool.";
+      return "This version updates the phone and keeps the Magisk app.";
     case "firmware":
       return "Choose a full package and paste the published checksum.";
     case "review":
@@ -186,9 +187,9 @@ function gateList(gates: GateView[]): HTMLElement {
 }
 
 function logLine(line: LogLine): HTMLElement {
-  const tone = line.level === "ok" ? "ok" : line.level === "error" ? "warn" : line.level === "would" ? "p" : "";
+  const tone = line.level === "ok" ? "fw-log-ok" : line.level === "error" ? "fw-log-warn" : line.level === "would" ? "fw-log-prompt" : "";
   const text = el("span", tone ? { class: tone } : {}, [line.text]);
-  return el("div", { class: "fw-log-line" }, [el("span", { class: "t" }, [`${line.ts} `]), text]);
+  return el("div", { class: "fw-log-line" }, [el("span", { class: "fw-log-time" }, [`${line.ts} `]), text]);
 }
 
 export function mountLog(host: HTMLElement, lines: LogLine[]): void {
@@ -324,7 +325,7 @@ function chooseView(model: ShellModel): HTMLElement {
     choiceCard(
       "update_keep_root",
       "Update and keep root",
-      "Update this phone and keep the on-device root tool.",
+      "Update this phone and keep the Magisk app.",
       assets.update,
       chosen,
       false,
@@ -391,9 +392,11 @@ function firmwareView(model: ShellModel): HTMLElement {
   const check = el("button", { class: "fw-btn", type: "button", "data-action": "check-firmware" });
   check.textContent = "Check package";
   row.append(check);
-  const sample = el("button", { class: "fw-btn", type: "button", "data-action": "sample" });
-  sample.textContent = "Use sample package";
-  row.append(sample);
+  if (import.meta.env.DEV) {
+    const sample = el("button", { class: "fw-btn", type: "button", "data-action": "sample" });
+    sample.textContent = "Use sample package";
+    row.append(sample);
+  }
   if (model.tauri) {
     const browse = el("button", { class: "fw-btn", type: "button", "data-action": "browse" });
     browse.textContent = "Browse…";
@@ -416,6 +419,9 @@ function firmwareView(model: ShellModel): HTMLElement {
       facts.append(el("dt", {}, [term]), el("dd", {}, [value]));
     }
     wrap.append(facts);
+    const patch = el("button", { class: "fw-btn", type: "button", "data-action": "prepare-patch" });
+    patch.textContent = "Patch on your phone";
+    wrap.append(patch);
   }
   return wrap;
 }
@@ -600,14 +606,21 @@ function confirmDialog(model: ShellModel): HTMLElement | null {
   if (!confirm || !plan) {
     return null;
   }
-  const flash = el("button", {
+  const patch = plan.kind === "prepare_patch";
+  const slot = plan.target_slot.toUpperCase();
+  const title = patch ? "Patch on your phone?" : `Flash ${plan.codename} slot ${slot}?`;
+  const body = patch
+    ? "Flashwright will copy the stock image to a temporary folder on your phone, run Magisk's patcher, copy the result back and delete the folder. Nothing is flashed."
+    : `This writes slot ${slot}. Plan code ${plan.plan_code}. Backup set ${plan.backup_set_id}.`;
+  const action = el("button", {
     class: "fw-btn fw-btn--primary",
     type: "button",
-    "data-action": "confirm-run",
-    "aria-keyshortcuts": "Alt+F",
+    "data-action": patch ? "confirm-patch" : "confirm-run",
+    "aria-keyshortcuts": patch ? "Alt+P" : "Alt+F",
   });
-  flash.disabled = !confirm.armed;
-  flash.append(keyLabel("F", confirm.armed ? "lash now" : `lash now (${confirm.secondsLeft})`));
+  action.disabled = !confirm.armed;
+  const label = patch ? "atch now" : confirm.armed ? "lash now" : `lash now (${confirm.secondsLeft})`;
+  action.append(keyLabel(patch ? "P" : "F", label));
   const cancel = keyButton("cancel-dialog", "fw-btn fw-btn--default", "C", "ancel");
   const dialog = el("div", {
     class: "fw-dialog fw-window fw-dialog--warn",
@@ -621,14 +634,12 @@ function confirmDialog(model: ShellModel): HTMLElement | null {
     el("div", { class: "fw-dialog__body" }, [
       el("img", { src: assets.update, alt: "" }),
       el("div", {}, [
-        el("h2", { id: "confirm-title" }, ["Flash this plan?"]),
-        el("p", { id: "confirm-body" }, [
-          `${plan.plan_code} · slot ${plan.target_slot.toUpperCase()}. Enter cancels. Flash now stays off for 2 seconds.`,
-        ]),
+        el("h2", { id: "confirm-title" }, [title]),
+        el("p", { id: "confirm-body" }, [body]),
         el("p", { class: "fw-mono" }, [plan.plan_hash]),
       ]),
     ]),
-    el("div", { class: "fw-dialog__actions" }, [flash, cancel]),
+    el("div", { class: "fw-dialog__actions" }, [action, cancel]),
   );
   return el("div", { class: "fw-backdrop" }, [dialog]);
 }
@@ -644,7 +655,7 @@ function overlay(model: ShellModel): HTMLElement | null {
     copy.append(
       el("h2", {}, ["About this window"]),
       el("p", {}, [
-        "Flashwright walks through an update one step at a time. The plan code is issued by the engine. This copy uses a mock phone, so it never writes to a device.",
+        "Flashwright walks through an update one step at a time. The plan code is issued by the engine. This copy uses a mock phone, so it never writes to a device. Android, Google and Pixel are trademarks of Google LLC. Magisk is a project by topjohnwu. They are named descriptively; Flashwright isn't affiliated with or endorsed by them.",
       ]),
     );
   } else {
@@ -762,11 +773,36 @@ export function renderShell(model: ShellModel): HTMLElement {
 
   windowEl.append(title, toolbar, wizard, statusbar);
   app.append(windowEl);
-  const dialog = confirmDialog(model) ?? overlay(model);
+  const dialog = model.stopAsk ? stopDialog() : confirmDialog(model) ?? overlay(model);
   if (dialog) {
     app.append(dialog);
   }
   return app;
+}
+
+function stopDialog(): HTMLElement {
+  const stop = el("button", {
+    class: "fw-btn",
+    type: "button",
+    "data-action": "stop-confirm",
+  });
+  stop.textContent = "Stop after this step";
+  const cancel = keyButton("cancel-stop", "fw-btn fw-btn--default", "C", "ancel");
+  const dialog = el("div", {
+    class: "fw-dialog fw-window fw-dialog--warn",
+    role: "alertdialog",
+    "aria-modal": "true",
+    "aria-labelledby": "stop-title",
+  });
+  dialog.append(
+    el("div", { class: "fw-titlebar" }, [el("span", { class: "fw-titlebar__title" }, ["Stop"])]),
+    el("div", { class: "fw-dialog__body" }, [
+      el("h2", { id: "stop-title" }, ["Are you sure?"]),
+      el("p", {}, ["The current step will finish, then the job stops."]),
+    ]),
+    el("div", { class: "fw-dialog__actions" }, [stop, cancel]),
+  );
+  return el("div", { class: "fw-backdrop" }, [dialog]);
 }
 
 export function logHost(root: ParentNode): HTMLElement | null {

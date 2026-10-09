@@ -1,0 +1,5 @@
+error[E0433]: failed to resolve: could not find `LegacyChecks` in `safety`
+ --> tests/compile_fail/legacy_pass.rs:2:45
+  |
+2 |     let _checks = flashwright_core::safety::LegacyChecks::pass();
+  |                                             ^^^^^^^^^^^^ could not find `LegacyChecks` in `safety`

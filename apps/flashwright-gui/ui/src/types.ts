@@ -71,6 +71,8 @@ export interface PlanPreview {
   gates: GateView[];
   steps: Step[];
   prefer_dry_run: boolean;
+  kind?: string;
+  dry_run?: boolean;
 }
 
 export interface FirmwareReport {
@@ -138,18 +140,34 @@ export interface Snapshot {
   links: { id: string; label: string }[];
 }
 
+export interface FirmwareRef {
+  id: string;
+  display_name: string;
+  size: number;
+}
+
 export interface EngineApi {
   snapshot(): Promise<Snapshot>;
+  subscribe(): Promise<void>;
+  toolsStatus(): Promise<Snapshot>;
+  toolsPickFolder(): Promise<Snapshot>;
+  toolsImportZip(): Promise<Snapshot>;
   scan(): Promise<Snapshot>;
   selectDevice(serial: string): Promise<Snapshot>;
   continueFromConnect(): Promise<Snapshot>;
   setChoice(action: string, route: Route, preferDryRun: boolean): Promise<Snapshot>;
   continueFromChoose(): Promise<Snapshot>;
+  back(): Promise<Snapshot>;
+  pickFirmware(): Promise<FirmwareRef>;
   openFirmware(name: string, sha256: string): Promise<Snapshot>;
+  preparePatch(firmwareId: string): Promise<Snapshot>;
   buildPlan(): Promise<Snapshot>;
+  ackGate(planHash: string, gateId: string): Promise<Snapshot>;
   dryRun(planHash: string): Promise<Snapshot>;
   confirmAndRun(planHash: string): Promise<Snapshot>;
-  back(): Promise<Snapshot>;
-  openExternal(urlId: string): Promise<Snapshot>;
+  cancel(): Promise<Snapshot>;
   recoveryPlan(optionId: string): Promise<Snapshot>;
+  backupsList(): Promise<Snapshot>;
+  restorePlan(setId: string, item: string): Promise<Snapshot>;
+  openExternal(urlId: string): Promise<Snapshot>;
 }

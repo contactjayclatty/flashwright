@@ -6,9 +6,11 @@ Portions derived from PixelFlasher, Copyright badabing2005, AGPL-3.0-or-later, h
 
 The safety gates use PixelFlasher's device table, Magisk list, kernel list, bootloader minimums, and slot checks from that commit, translated into the files under `data/` and checked in `flashwright-core`. Each file, line range, and commit is in `docs/disclaimer.md`. The LU0 and FIPS block is Flashwright policy, not a PixelFlasher table.
 
-M1 does not copy PixelFlasher source beyond the behaviour listed in `docs/disclaimer.md`.
+PixelFlasher source is not copied. The behaviour rows, and the items that are not used, are in `docs/disclaimer.md`.
 
-M1 does not use payload-dumper-rust, the AOSP update-engine proto, or an avbtool port.
+Factory and full OTA packages are opened with `payload_dumper` 0.8.4 (`local_zip` only). Its Apache-2.0 licence is `third_party/payload-dumper-rust/LICENSE`. That repository has no NOTICE file. The comparison proto under `third_party/payload-dumper-rust/proto/` is not compiled. After comments and whitespace are removed, it matches the AOSP proto except for `InstallOperation.Type` value `ZSTD = 14`.
+
+The compiled proto is `third_party/aosp/update_engine/update_metadata.proto` from `platform/system/update_engine` commit `dc84c2552b2d4cf00d2a843cb1c091d99d0499f1` (SHA-256 `09da1556e3edb9197ca88103b22ea07230a634c004605d4aa1efee6a6ed6e60d`). The boot-image footer reader follows AOSP `external/avb` commit `761178607206f4cb2af79ed9eec52d8cbd814adb` (MIT, `third_party/aosp/avb/NOTICE`). The unlicensed Python `payload_dumper` is not used.
 
 ## Direct crates
 
@@ -29,6 +31,10 @@ Versions are the ones resolved in `Cargo.lock` on 9 Oct 2026.
 | serde_json | 1.0.151 | MIT OR Apache-2.0 |
 | serde_jcs | 0.1.0 | MIT OR Apache-2.0 |
 | uuid | 1.11.0 | Apache-2.0 OR MIT |
+| payload_dumper | 0.8.4 | Apache-2.0 |
+| prost | 0.14.4 | Apache-2.0 |
+| prost-build | 0.14.4 | Apache-2.0 |
+| protoc-bin-vendored | 3.3.0 | Apache-2.0 (bundled `protoc` is BSD-3-Clause) |
 
 `zip` is built with `deflate-flate2-zlib-rs` only.
 
@@ -37,7 +43,7 @@ Versions are the ones resolved in `Cargo.lock` on 9 Oct 2026.
 | Item | Source | Licence | Where |
 | --- | --- | --- | --- |
 | Tauri 2.12.2, tauri-build 2.7.1, tauri-plugin-dialog 2.8.1, tauri-plugin-opener 2.7.0, `@tauri-apps/api` 2.12.2, `@tauri-apps/cli` 2.12.1 | https://github.com/tauri-apps/tauri | Apache-2.0 OR MIT | `apps/flashwright-gui` |
-| serde_json 1.0.151 | https://github.com/serde-rs/json | MIT OR Apache-2.0 | `crates/flashwright-wizard` |
+| serde_json 1.0.151 | https://github.com/serde-rs/json | MIT OR Apache-2.0 | `crates/flashwright-core` |
 | serde_jcs 0.1.0 | https://github.com/l1h3r/serde_jcs | MIT OR Apache-2.0 | Plan canonicalisation |
 | sha2 0.10.9, hex 0.4.3 | RustCrypto | MIT OR Apache-2.0 | Plan digest |
 | uuid 1.11.0 | https://github.com/uuid-rs/uuid | MIT OR Apache-2.0 | Plan ids |

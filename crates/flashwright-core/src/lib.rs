@@ -7,6 +7,8 @@
 //! crate. A blocked platform-tools build is refused before any device
 //! command runs.
 
+pub use flashwright_firmware as firmware;
+
 pub mod cmd;
 pub mod device;
 pub mod exe;
@@ -16,6 +18,9 @@ pub mod safety;
 pub mod timeouts;
 pub mod token;
 pub mod wizard;
+
+#[cfg(any(test, feature = "mock", debug_assertions))]
+pub mod mock;
 
 mod invoke;
 
@@ -72,6 +77,21 @@ pub enum CoreError {
 
     #[error("{reason}")]
     Rejected { reason: String },
+
+    #[error("That plan was already used.")]
+    AlreadyUsed,
+
+    #[error("A plan can only be confirmed from the review step.")]
+    WrongState,
+
+    #[error("That plan was discarded. Build it again.")]
+    Discarded,
+
+    #[error("A dry-run plan does not write.")]
+    DryRunPlan,
+
+    #[error("That plan is not a dry run.")]
+    NotDryRun,
 }
 
 /// Minimal events for a later UI. `v` is the payload version.
@@ -236,5 +256,15 @@ fn verdict_label(verdict: &ToolsVerdict) -> &'static str {
         "scan only"
     } else {
         "blocked"
+    }
+}
+
+#[cfg(test)]
+mod firmware_export {
+    #[test]
+    fn firmware_api_is_reexported() {
+        let workers = crate::firmware::extraction_workers();
+        assert!(workers >= 1);
+        assert!(workers <= 4);
     }
 }

@@ -6,7 +6,7 @@ members = [
     "crates/flashwright-device",
     "crates/flashwright-winusb",
     "crates/flashwright-core",
-    "crates/flashwright-wizard",
+    "crates/flashwright-firmware",
     "crates/flashwright-plan",
     "crates/flashwright-magisk",
     "apps/flashwright-gui/src-tauri",

@@ -43,8 +43,8 @@ pub fn read_boot_image(path: &Path, partition: &str) -> Result<BootInfo, Firmwar
     if &footer[0..4] != b"AVBf" {
         return Err(FirmwareError::BootImage);
     }
-    let vbmeta_offset = u64::from_be_bytes(footer[16..24].try_into().unwrap());
-    let vbmeta_size = u64::from_be_bytes(footer[24..32].try_into().unwrap());
+    let vbmeta_offset = u64::from_be_bytes(footer[20..28].try_into().unwrap());
+    let vbmeta_size = u64::from_be_bytes(footer[28..36].try_into().unwrap());
     if vbmeta_size < VBMETA_HEADER as u64 || vbmeta_offset.saturating_add(vbmeta_size) > len {
         return Err(FirmwareError::BootImage);
     }
@@ -169,9 +169,9 @@ fn synthetic_footer(original: u64, vbmeta_offset: u64, vbmeta_size: u64) -> [u8;
     let mut footer = [0u8; FOOTER_LEN];
     footer[0..4].copy_from_slice(b"AVBf");
     footer[4..8].copy_from_slice(&1u32.to_be_bytes());
-    put_u64_arr(&mut footer, 8, original);
-    put_u64_arr(&mut footer, 16, vbmeta_offset);
-    put_u64_arr(&mut footer, 24, vbmeta_size);
+    put_u64_arr(&mut footer, 12, original);
+    put_u64_arr(&mut footer, 20, vbmeta_offset);
+    put_u64_arr(&mut footer, 28, vbmeta_size);
     footer
 }
 
@@ -191,7 +191,11 @@ mod tests {
 
     #[test]
     fn round_trip_properties() {
-        let image = synthetic_boot("init_boot", "2026-10-01", "google/komodo/komodo:17/TEST/1:user/release-keys");
+        let image = synthetic_boot(
+            "init_boot",
+            "2026-10-01",
+            "google/komodo/komodo:17/TEST/1:user/release-keys",
+        );
         let dir = std::env::temp_dir().join("fw-boot-roundtrip");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("init_boot.img");

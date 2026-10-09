@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-choice"
+description = "Enables the set_choice command without any pre-configured scope."
+commands.allow = ["set_choice"]
+
+[[permission]]
+identifier = "deny-set-choice"
+description = "Denies the set_choice command without any pre-configured scope."
+commands.deny = ["set_choice"]

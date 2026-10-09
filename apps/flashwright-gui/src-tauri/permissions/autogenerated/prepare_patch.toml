@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-prepare-patch"
+description = "Enables the prepare_patch command without any pre-configured scope."
+commands.allow = ["prepare_patch"]
+
+[[permission]]
+identifier = "deny-prepare-patch"
+description = "Denies the prepare_patch command without any pre-configured scope."
+commands.deny = ["prepare_patch"]

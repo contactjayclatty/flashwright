@@ -26,6 +26,8 @@ pub struct ScriptedResponse {
     pub delay: Duration,
     /// Ignore `stdout` and block until the watchdog or the overall timeout.
     pub hang: bool,
+    /// Report the run as truncated even when the buffer itself fits.
+    pub stdout_truncated: bool,
 }
 
 impl ScriptedResponse {
@@ -36,6 +38,7 @@ impl ScriptedResponse {
             stderr: Vec::new(),
             delay: Duration::ZERO,
             hang: false,
+            stdout_truncated: false,
         }
     }
 
@@ -46,6 +49,7 @@ impl ScriptedResponse {
             stderr: stderr.into(),
             delay: Duration::ZERO,
             hang: false,
+            stdout_truncated: false,
         }
     }
 
@@ -71,7 +75,13 @@ impl ScriptedResponse {
             stderr: Vec::new(),
             delay: Duration::ZERO,
             hang: true,
+            stdout_truncated: false,
         }
+    }
+
+    pub fn truncated(mut self) -> Self {
+        self.stdout_truncated = true;
+        self
     }
 }
 
@@ -200,6 +210,8 @@ impl ScriptedRunner {
             program: exe.path().to_path_buf(),
             args: command.args().to_vec(),
             timeout: limits.timeout,
+            watchdog: limits.watchdog,
+            finalising: limits.finalising,
         };
         let response = {
             let mut inner = self.inner.lock().expect("scripted runner lock");
@@ -244,7 +256,7 @@ impl ScriptedRunner {
             Some(response.exit_code),
             response.stdout,
             response.stderr,
-            false,
+            response.stdout_truncated,
             false,
             started.elapsed(),
             false,

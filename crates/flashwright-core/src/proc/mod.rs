@@ -52,6 +52,8 @@ pub struct RecordedCall {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub timeout: Duration,
+    pub watchdog: Option<Duration>,
+    pub finalising: Option<Duration>,
 }
 
 /// Timers for one catalogue command.

@@ -9,6 +9,7 @@
 mod newtypes;
 mod render;
 
+pub(crate) use newtypes::MAX_BLOCK_LEN;
 pub use newtypes::{
     AssetRef, ByNameRoot, ByteLen, CmdError, DeviceSerial, DumpsysService, FastbootVar, HostRef,
     ImageRef, PackageName, PropName, ValidatedDevicePath, WorkFile, MAGISK_PACKAGE,

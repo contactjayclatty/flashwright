@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tools-import-zip"
+description = "Enables the tools_import_zip command without any pre-configured scope."
+commands.allow = ["tools_import_zip"]
+
+[[permission]]
+identifier = "deny-tools-import-zip"
+description = "Denies the tools_import_zip command without any pre-configured scope."
+commands.deny = ["tools_import_zip"]
