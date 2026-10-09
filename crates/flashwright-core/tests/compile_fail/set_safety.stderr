@@ -1,0 +1,5 @@
+error[E0599]: no method named `set_safety` found for struct `WizardSession` in the current scope
+  --> tests/compile_fail/set_safety.rs:10:21
+   |
+10 |     let _ = session.set_safety();
+   |                     ^^^^^^^^^^ method not found in `WizardSession<ScriptedRunner>`

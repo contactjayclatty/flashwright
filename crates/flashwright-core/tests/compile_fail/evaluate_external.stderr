@@ -1,0 +1,11 @@
+error[E0603]: function `evaluate` is private
+ --> tests/compile_fail/evaluate_external.rs:2:44
+  |
+2 |     let _gates = flashwright_core::safety::evaluate(&[], None, None);
+  |                                            ^^^^^^^^ private function
+  |
+note: the function `evaluate` is defined here
+ --> src/safety/mod.rs
+  |
+  | pub(crate) use evaluate::{evaluate, evaluate_acked, evaluate_step, FactEvidence, SafetyFacts};
+  |                           ^^^^^^^^
