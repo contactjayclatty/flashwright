@@ -26,6 +26,19 @@ use crate::CoreError;
 pub const PLAN_SCHEMA: &str = "flashwright.plan.v1";
 pub const PLAN_TTL_MS: i64 = 15 * 60 * 1000;
 
+/// Open a session that runs the adb and fastboot installed on this machine.
+pub fn with_platform_tools(
+    adb: std::path::PathBuf,
+    fastboot: std::path::PathBuf,
+) -> WizardSession<impl crate::proc::CommandRunner> {
+    WizardSession::new(PlatformToolsTransport::new(
+        std::sync::Arc::new(crate::proc::SystemRunner),
+        adb,
+        fastboot,
+        crate::device::TransportConfig::production(),
+    ))
+}
+
 /// Window phases. Only [`Phase::Review`] may confirm or dry-run a plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
