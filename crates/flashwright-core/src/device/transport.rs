@@ -111,6 +111,21 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         });
     }
 
+    /// Drop queued writes except the last `keep` of them.
+    ///
+    /// A failed patch still has to run its cleanup writes. Those are the
+    /// last write steps in the plan.
+    pub(crate) fn keep_last_pending(&self, keep: usize) {
+        let mut guard = self.active.lock().expect("armed run");
+        let Some(active) = guard.as_mut() else {
+            return;
+        };
+        let len = active.pending.len();
+        if len > keep {
+            active.pending.drain(0..len - keep);
+        }
+    }
+
     pub async fn run_read(&self, cmd: crate::cmd::ReadCmd) -> Result<RunResult, DeviceError> {
         let rendered =
             crate::cmd::read_argv(&cmd).map_err(|err| DeviceError::Message(err.to_string()))?;

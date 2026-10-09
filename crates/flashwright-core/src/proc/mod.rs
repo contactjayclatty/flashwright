@@ -54,6 +54,8 @@ pub struct Invocation {
     pub timeout: Duration,
     pub watchdog: Option<Duration>,
     pub group: ProcessGroup,
+    /// Working directory for this child. `None` keeps the runner's default.
+    pub current_dir: Option<PathBuf>,
 }
 
 impl Invocation {
@@ -65,7 +67,13 @@ impl Invocation {
             timeout,
             watchdog: None,
             group: ProcessGroup::TiedToParent,
+            current_dir: None,
         }
+    }
+
+    pub fn with_current_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.current_dir = Some(dir.into());
+        self
     }
 
     pub fn with_watchdog(mut self, watchdog: Duration) -> Self {

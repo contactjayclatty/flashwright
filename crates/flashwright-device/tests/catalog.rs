@@ -11,6 +11,9 @@ fn embedded_tables_parse_and_stay_unseeded() {
     let devices = DeviceTable::embedded().unwrap();
     assert!(devices.get("shiba").unwrap().has_init_boot);
     assert!(!devices.get("oriole").unwrap().has_init_boot);
+    let komodo = devices.get("komodo").unwrap();
+    assert_eq!(komodo.model.as_deref(), Some("Pixel 9 Pro XL"));
+    assert!(komodo.has_init_boot);
     assert!(KnownBadMagisk::embedded().unwrap().version_codes.is_empty());
     assert!(MinBootloaderTable::embedded().unwrap().entries.is_empty());
 }

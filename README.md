@@ -61,6 +61,16 @@
 
 <p align="center">This build uses sample phones and does not write to a device.</p>
 
+## Features
+
+- **Patch on your phone.** The Magisk app you already installed patches init_boot. You confirm "Patch on your phone?" before anything is copied to the phone.
+- **PC check.** Flashwright unpacks the patched init_boot with magiskboot and checks that Magisk's init and the stock SHA-1 are present. magiskboot is a tool you supply. It is not included with Flashwright.
+- **Pixel 9 Pro XL.** That phone (komodo) patches init_boot.
+
+## Status
+
+The patch step is exercised with sample command output. It does not talk to a phone. A hidden or renamed Magisk app stops the plan before any file is copied. The LU0 / FIPS region is refused.
+
 ## The wizard
 
 <table>

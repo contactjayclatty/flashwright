@@ -5,9 +5,10 @@
 //!
 //! A later change moves the full window state machine into this module.
 //! This seam is the public read, plan, and confirm API that window will call.
-//! The only public write entry point is [`WizardSession::confirm_and_run`].
-//! It mints a write token internally. A second call with the same plan fails
-//! because the plan has been consumed.
+//! The public write entry points are [`WizardSession::confirm_and_run`] and
+//! [`WizardSession::confirm_and_run_finally`]. Each mints a write token
+//! internally. A second call with the same plan fails because the plan has
+//! been consumed.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -239,6 +240,94 @@ impl<R: CommandRunner> WizardSession<R> {
         self.phase = Phase::Done;
         Ok(RunReport { lines })
     }
+
+    /// Run a confirmed plan. The last `finally_steps` still run when an
+    /// earlier step fails, so a patch can delete its work directory.
+    pub async fn confirm_and_run_finally(
+        &mut self,
+        plan_hash_value: &str,
+        finally_steps: usize,
+    ) -> Result<RunReport, CoreError> {
+        let dry_run = self.ready(plan_hash_value)?.dry_run;
+        if dry_run {
+            return Err(rejected("A dry-run plan does not write."));
+        }
+        let held = self.held.take().expect("review plan");
+        if finally_steps > held.steps.len() {
+            self.held = Some(held);
+            return Err(rejected("Cleanup is longer than the plan."));
+        }
+        self.phase = Phase::Flash;
+        let writes: Vec<WriteCmd> = held
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                PlanStep::Write(cmd) => Some(cmd.clone()),
+                PlanStep::Read(_) => None,
+            })
+            .collect();
+        let (plan, token) = mint_confirmed(&held.hash, &held.serial, &writes);
+        self.transport.arm(&plan);
+        let split = held.steps.len() - finally_steps;
+        let finally_writes = held.steps[split..]
+            .iter()
+            .filter(|step| matches!(step, PlanStep::Write(_)))
+            .count();
+        let mut lines = Vec::new();
+        let mut failed: Option<CoreError> = None;
+        for step in &held.steps[..split] {
+            match run_planned(&self.transport, &token, step).await {
+                Ok(text) => lines.push(text),
+                Err(err) => {
+                    failed = Some(err);
+                    break;
+                }
+            }
+        }
+        if failed.is_some() {
+            self.transport.keep_last_pending(finally_writes);
+        }
+        for step in &held.steps[split..] {
+            match run_planned(&self.transport, &token, step).await {
+                Ok(text) => lines.push(text),
+                Err(err) => {
+                    if failed.is_none() {
+                        failed = Some(err);
+                    }
+                }
+            }
+        }
+        drop(token);
+        if let Some(err) = failed {
+            self.phase = Phase::Recovery;
+            return Err(err);
+        }
+        self.phase = Phase::Done;
+        Ok(RunReport { lines })
+    }
+}
+
+async fn run_planned<R: CommandRunner>(
+    transport: &PlatformToolsTransport<R>,
+    token: &crate::token::WriteToken,
+    step: &PlanStep,
+) -> Result<String, CoreError> {
+    match step {
+        PlanStep::Read(cmd) => {
+            let result = transport.run_read(cmd.clone()).await?;
+            if !result.success_exit() {
+                return Err(rejected("A read step failed."));
+            }
+            Ok(result.stdout_text())
+        }
+        PlanStep::Write(cmd) => {
+            let result = transport.run_write(token, cmd.clone()).await;
+            match result {
+                Ok(result) if write_ok(cmd, &result) => Ok(result.stdout_text()),
+                Ok(_) | Err(_) => Err(rejected("A write step failed.")),
+            }
+        }
+    }
 }
 
 impl<R: CommandRunner> WizardSession<R> {
@@ -359,7 +448,10 @@ fn write_ok(cmd: &WriteCmd, result: &crate::proc::RunResult) -> bool {
             parse::parse_sideload(&text)
         }
         WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Push { .. }) => parse::parse_push(&text),
-        WriteCmd::AdbShell(_) | WriteCmd::Su(_) => parse::parse_patch_script(&text),
+        WriteCmd::AdbShell(crate::cmd::AdbShellWrite::RunPatchScript { .. }) | WriteCmd::Su(_) => {
+            parse::parse_patch_script(&text)
+        }
+        WriteCmd::AdbShell(_) => parse::parse_fixed_shell(&text),
     };
     matches!(verdict, Verdict::Ok | Verdict::Uncertain { .. })
 }

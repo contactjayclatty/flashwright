@@ -1,6 +1,6 @@
 [package]
 name = "flashwright-magisk"
-description = "Magisk patch step specs and the phone-side patch script."
+description = "Magisk app patch plan and the phone-side patch script."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,4 +11,14 @@ publish.workspace = true
 
 [dependencies]
 flashwright-core = { path = "../flashwright-core" }
+flashwright-plan = { path = "../flashwright-plan" }
 thiserror.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+zip.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
