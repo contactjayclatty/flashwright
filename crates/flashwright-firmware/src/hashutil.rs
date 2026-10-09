@@ -17,15 +17,18 @@ use crate::error::FirmwareError;
 pub const HASH_CHUNK: usize = 1024 * 1024;
 pub const HASH_PROGRESS_EVERY: u64 = 64 * 1024 * 1024;
 
-pub fn hash_chunk_len() -> usize {
+#[cfg(test)]
+pub(crate) fn hash_chunk_len() -> usize {
     HASH_CHUNK
 }
 
-pub fn hash_progress_interval() -> u64 {
+#[cfg(test)]
+pub(crate) fn hash_progress_interval() -> u64 {
     HASH_PROGRESS_EVERY
 }
 
-pub fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
+#[cfg(test)]
+pub(crate) fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
@@ -59,7 +62,10 @@ pub fn progress_due(bytes: u64, last_mark: &mut u64, interval: u64, done: bool) 
     }
 }
 
-pub fn sha256_file(path: &Path, mut progress: Option<&mut dyn FnMut(u64)>) -> Result<String, FirmwareError> {
+pub fn sha256_file(
+    path: &Path,
+    mut progress: Option<&mut dyn FnMut(u64)>,
+) -> Result<String, FirmwareError> {
     let mut file = File::open(path).map_err(FirmwareError::io)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; HASH_CHUNK];

@@ -6,7 +6,7 @@ Portions derived from PixelFlasher, Copyright badabing2005, AGPL-3.0-or-later, h
 
 ## Reuse log
 
-M1 reimplements the behaviour listed below in new code. It does not copy PixelFlasher source. Crate licences are listed in `docs/THIRD_PARTY.md`.
+The rows below are rewritten behaviour, not copied PixelFlasher source. Crate licences are listed in `docs/THIRD_PARTY.md`.
 
 | Item | Upstream source (URL, path, commit) | Licence | Where used | Notes |
 | --- | --- | --- | --- | --- |
@@ -21,8 +21,14 @@ M1 reimplements the behaviour listed below in new code. It does not copy PixelFl
 | Reboot and wait | `phone.py` lines 4101–4300, 4448–4483, and 4413, same commit | AGPL-3.0-or-later | `flashwright-device` | §3.5 waits. A missing poll is not an unplug. Rewritten. |
 | Command catalogue and write confirm | Behaviour only, same commit | AGPL-3.0-or-later | `flashwright-core` | Typed argv, timeouts, and parsers. Rewritten. The confirm path mints its token inside the core crate. |
 | Device alias table | Upstream issue 325, marked unverified | — | `data/device_aliases.toml` | `eos` maps to `aurora`. |
-| payload-dumper-rust | https://github.com/rhythmcache/payload-dumper-rust — path: none copied — commit `ac244d82b54fdd76adf9bf0afcd6edc97f277f7e` (`main`, 2026-09-05) | Apache-2.0 | — | Not used in M1 |
+| Package selection | `pf_modules.py` `select_firmware` lines 598–664, same commit | AGPL-3.0-or-later | `flashwright-firmware` | Zip only. Package SHA-256, filename fragment, and codename token. Rewritten. |
+| Factory and OTA open | `pf_modules.py` `process_file` from line 670, payload branch around 812, extract 971–1147, same commit | AGPL-3.0-or-later | `flashwright-firmware` | Factory image zip and full OTA `payload.bin`. Prefer `init_boot` over `boot`. Rewritten. Not ported: 7-Zip, Samsung/Odin, custom ROM, database cache, extra images, or the Python payload extractor. |
+| Chunked SHA-256 | `runtime.py` lines 3217–3228, same commit | AGPL-3.0-or-later | `flashwright-firmware` | Chunked package hash. Rewritten. This tree uses a 1 MiB buffer. |
+| init_boot vs boot | `runtime.py` `has_init_boot` lines 1140–1147, same commit | AGPL-3.0-or-later | `flashwright-firmware` | The firmware crate reads `data/devices.toml` when choosing `init_boot` or `boot`. The safety gate records the same lines separately. |
+| payload-dumper-rust | https://github.com/rhythmcache/payload-dumper-rust commit `ac244d82b54fdd76adf9bf0afcd6edc97f277f7e`. Crate `payload_dumper` 0.8.4. Licence file `third_party/payload-dumper-rust/LICENSE`. No NOTICE file in that repository. | Apache-2.0 | `flashwright-firmware` | Used to read a stored `payload.bin` and extract one partition. Features: `local_zip` only. |
 | payload_dumper | https://github.com/vm03/payload_dumper — path: none copied — commit `2f0a964b8b77c6244e3e12735f85539c938f9c97` | No licence | Not used | Not used (no licence) |
+| AOSP update metadata | https://android.googlesource.com/platform/system/update_engine path `update_metadata.proto` commit `dc84c2552b2d4cf00d2a843cb1c091d99d0499f1`. SHA-256 `09da1556e3edb9197ca88103b22ea07230a634c004605d4aa1efee6a6ed6e60d`. Copy: `third_party/aosp/update_engine/`. | Apache-2.0 | `flashwright-firmware` | Bindings are generated at build time. The payload partition hash is read from this copy. |
+| AOSP AVB footer | https://android.googlesource.com/platform/external/avb commit `761178607206f4cb2af79ed9eec52d8cbd814adb`. Notice: `third_party/aosp/avb/NOTICE`. | MIT | `flashwright-firmware` | Footer, vbmeta header, and property descriptors, matching `avbtool info_image`. No avbtool source is copied. Signature checks are not done. |
 | busybox | No copy in this repository. Fetched at runtime from the user's own root app. | GPL-2.0 | Not bundled | Fetched at runtime and not bundled (GPL-2.0) |
 | Upstream certificates, icons, and third-party logos | None | — | Not used | No upstream certificates, icons, or third-party logos are reused |
 | Tauri, including `tauri` 2.12.2, `tauri-build` 2.7.1, `tauri-plugin-dialog` 2.8.1, `tauri-plugin-opener` 2.7.0, and `@tauri-apps/api` 2.12.2 | https://github.com/tauri-apps/tauri | Apache-2.0 OR MIT | `apps/flashwright-gui` | Used as the window shell. No upstream application code was copied. |

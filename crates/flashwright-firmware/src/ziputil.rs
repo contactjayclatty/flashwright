@@ -16,15 +16,12 @@ pub const COPY_CHUNK: usize = 64 * 1024;
 
 pub fn open_zip(path: &Path) -> Result<ZipArchive<File>, FirmwareError> {
     let file = File::open(path).map_err(FirmwareError::io)?;
-    ZipArchive::new(file).map_err(|err| map_zip(err))
+    ZipArchive::new(file).map_err(map_zip)
 }
 
-pub fn entry_name<R: Read>(entry: &zip::read::ZipFile<'_, R>) -> String {
-    entry
-        .name()
-        .map(|value| value.to_string())
-        .unwrap_or_default()
-        .replace('\\', "/")
+pub fn entry_name<R: Read>(entry: &zip::read::ZipFile<'_, R>) -> Result<String, FirmwareError> {
+    let name = entry.name().map_err(map_zip)?;
+    Ok(name.replace('\\', "/"))
 }
 
 pub fn base_name(name: &str) -> &str {
@@ -33,8 +30,9 @@ pub fn base_name(name: &str) -> &str {
 
 pub fn map_zip(err: zip::result::ZipError) -> FirmwareError {
     let text = err.to_string();
-    if text.to_ascii_lowercase().contains("crc") {
-        FirmwareError::Archive("CRC-32 check failed".into())
+    let lowered = text.to_ascii_lowercase();
+    if lowered.contains("crc") || lowered.contains("checksum") {
+        FirmwareError::Crc
     } else {
         FirmwareError::Truncated
     }
@@ -47,17 +45,32 @@ pub fn stream_entry<R: Read>(
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(FirmwareError::io)?;
     }
-    let mut output = File::create(dest).map_err(FirmwareError::io)?;
-    let mut buf = vec![0u8; COPY_CHUNK];
-    loop {
-        let read = entry.read(&mut buf).map_err(FirmwareError::io)?;
-        if read == 0 {
-            break;
+    let result = (|| {
+        let mut output = File::create(dest).map_err(FirmwareError::io)?;
+        let mut buf = vec![0u8; COPY_CHUNK];
+        loop {
+            let read = entry.read(&mut buf).map_err(map_read)?;
+            if read == 0 {
+                break;
+            }
+            output.write_all(&buf[..read]).map_err(FirmwareError::io)?;
         }
-        output.write_all(&buf[..read]).map_err(FirmwareError::io)?;
+        output.flush().map_err(FirmwareError::io)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(dest);
     }
-    output.flush().map_err(FirmwareError::io)?;
-    Ok(())
+    result
+}
+
+pub fn map_read(err: io::Error) -> FirmwareError {
+    let text = err.to_string().to_ascii_lowercase();
+    if text.contains("crc") || text.contains("checksum") {
+        FirmwareError::Crc
+    } else {
+        FirmwareError::io(err)
+    }
 }
 
 /// Byte range of a stored local file, after the local header.
@@ -135,4 +148,35 @@ pub fn is_image_zip(name: &str) -> bool {
 
 pub fn temp_inner(dir: &Path) -> PathBuf {
     dir.join("image.zip")
+}
+
+#[derive(Clone, Debug)]
+pub struct ListedEntry {
+    pub index: usize,
+    pub name: String,
+    pub size: u64,
+    pub compressed_size: u64,
+    pub compression: zip::CompressionMethod,
+    pub data_start: Option<u64>,
+    pub header_start: u64,
+    pub is_dir: bool,
+}
+
+pub fn list_entries(path: &Path) -> Result<Vec<ListedEntry>, FirmwareError> {
+    let mut archive = open_zip(path)?;
+    let mut out = Vec::new();
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(map_zip)?;
+        out.push(ListedEntry {
+            index,
+            name: entry_name(&entry)?,
+            size: entry.size(),
+            compressed_size: entry.compressed_size(),
+            compression: entry.compression(),
+            data_start: entry.data_start(),
+            header_start: entry.header_start(),
+            is_dir: entry.is_dir(),
+        });
+    }
+    Ok(out)
 }
