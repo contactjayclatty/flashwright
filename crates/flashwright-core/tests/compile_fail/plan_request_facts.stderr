@@ -4,4 +4,4 @@ error[E0560]: struct `PlanRequest` has no field named `facts`
 7 |         facts: (),
   |         ^^^^^ `PlanRequest` does not have this field
   |
-  = note: all struct fields are already assigned
+  = note: available fields are: `images`

@@ -56,7 +56,7 @@ pub fn read_argv(cmd: &ReadCmd) -> Result<Rendered, CmdError> {
                 super::PullRemote::Work(file) => file.device_path(),
             };
             let mut args = serial_args(serial, &["pull", remote]);
-            args.push(dst_name.clone());
+            args.push(dst_name.as_str().to_string());
             args
         }
         ReadCmd::AdbShell(shell) => shell_remote(shell.serial_ref(), &render_shell(shell)?),
@@ -324,7 +324,7 @@ mod golden {
     use crate::cmd::{
         AdbHostRead, AdbHostWrite, AdbShellRead, AdbShellWrite, ByNameRoot, ByteLen, DeviceSerial,
         ExecOutSuRead, FastbootRead, FastbootVar, FastbootWrite, HostRef, ImageRef, PackageName,
-        PropName, PullRemote, ReadCmd, SuRead, SuWrite, WorkFile, WriteCmd,
+        PropName, PullName, PullRemote, ReadCmd, SuRead, SuWrite, WorkFile, WriteCmd,
     };
     use crate::device::{Partition, RebootTarget, Slot};
 
@@ -375,7 +375,7 @@ mod golden {
                 read_argv(&ReadCmd::AdbHost(AdbHostRead::Pull {
                     serial: serial.clone(),
                     remote: PullRemote::Validated(path),
-                    dst_name: "base.apk".into(),
+                    dst_name: PullName::new("base.apk").unwrap(),
                 }))
                 .unwrap(),
             ),
@@ -384,7 +384,7 @@ mod golden {
                 read_argv(&ReadCmd::AdbHost(AdbHostRead::Pull {
                     serial: serial.clone(),
                     remote: PullRemote::Work(WorkFile::Patched),
-                    dst_name: "patched.img".into(),
+                    dst_name: PullName::new("patched.img").unwrap(),
                 }))
                 .unwrap(),
             ),

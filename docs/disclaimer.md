@@ -6,7 +6,7 @@ Portions derived from PixelFlasher, Copyright badabing2005, AGPL-3.0-or-later, h
 
 ## Reuse log
 
-M1 reimplements the behaviour listed below in new code. It does not copy PixelFlasher source. Crate licences are listed in `docs/THIRD_PARTY.md`.
+M1 through M4 reimplement the behaviour listed below in new code. They do not copy PixelFlasher source. Crate licences are listed in `docs/THIRD_PARTY.md`.
 
 | Item | Upstream source (URL, path, commit) | Licence | Where used | Notes |
 | --- | --- | --- | --- | --- |
@@ -22,7 +22,8 @@ M1 reimplements the behaviour listed below in new code. It does not copy PixelFl
 | Command catalogue and write confirm | Behaviour only, same commit | AGPL-3.0-or-later | `flashwright-core` | Typed argv, timeouts, and parsers. Rewritten. The confirm path mints its token inside the core crate. |
 | App-method patch script | `pf_modules.py` `patch_magisk_script` lines 2698–2939, same commit | AGPL-3.0-or-later | `flashwright-magisk` `fl_patch.sh` | Behaviour rewritten. The phone script sets `KEEPVERITY`, `KEEPFORCEENCRYPT`, and `RECOVERYMODE=false`, runs the user's `boot_patch.sh` with the user's busybox, and prints three `FL_` lines. The upstream `[ -f"` typo is not reproduced. Magisk's `boot_patch.sh` is not shipped. |
 | App versus rooted method | `pf_modules.py` `patch_boot_img` lines 4783–4906, same commit | AGPL-3.0-or-later | `flashwright-magisk` | The Magisk app path is the one this build plans. UI Automator and a user-supplied APK are not offered. |
-| Hidden Magisk app | `pf_modules.py` `magisk_not_found` lines 3687–3715, same commit | AGPL-3.0-or-later | `flashwright-magisk` | Rewritten. The product sentence is "Hidden or renamed Magisk app isn't supported yet". Flashwright does not offer to install Magisk. |
+| Hidden Magisk app | `pf_modules.py` `magisk_not_found` lines 3687–3749, same commit | AGPL-3.0-or-later | `flashwright-magisk` | Rewritten. The product sentence is "Hidden or renamed Magisk app isn't supported yet". Flashwright does not offer to install Magisk. |
+| Magisk | Magisk app, GPL-3.0, https://github.com/topjohnwu/Magisk | GPL-3.0 | Not shipped | The Magisk app is GPL-3.0 and is not shipped. Flashwright uses the copy already installed on the phone. |
 | Magisk component extract | `runtime.py` `extract_magiskboot` lines 8702–8732, same commit | AGPL-3.0-or-later | `flashwright-magisk` | Translated to the `zip` crate. The upstream 7-Zip invocation is not used. Busybox and magiskboot stay inside the user's app. |
 | Stock SHA-1 | `runtime.py` `sha1` lines 3198–3211, same commit | AGPL-3.0-or-later | `flashwright-magisk` | Host SHA-1 of the stock image, via the `sha1` crate. |
 | Patched image check | `pf_modules.py` lines 5020–5119, same commit | AGPL-3.0-or-later | `flashwright-bootimg` | Read-only parser. It reads a v3 or v4 init_boot header, decompresses the ramdisk, requires Magisk's `init` and `.backup/.magisk`, and compares `SHA1=` with the stock image. It does not run magiskboot. `runtime.py` `extract_sha1` lines 3037–3058 and `compare_sha1` lines 3064–3098 are not ported. |

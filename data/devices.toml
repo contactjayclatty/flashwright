@@ -7,13 +7,16 @@
 codename = "shiba"
 model = "Pixel 8"
 has_init_boot = true
+patch_partition = "init_boot"
 
 [[device]]
 codename = "oriole"
 model = "Pixel 6"
 has_init_boot = false
+patch_partition = "boot"
 
 [[device]]
 codename = "komodo"
 model = "Pixel 9 Pro XL"
 has_init_boot = true
+patch_partition = "init_boot"

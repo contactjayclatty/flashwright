@@ -25,7 +25,8 @@ pub(crate) fn layout(image: &[u8]) -> Result<BootLayout, BootError> {
     if image.len() > MAX_IMAGE {
         return Err(BootError::TooLarge);
     }
-    if image.len() < V3_HEADER as usize || &image[..8] != MAGIC {
+    let magic = image.get(..8).ok_or(BootError::Header)?;
+    if image.len() < V3_HEADER as usize || magic != MAGIC {
         return Err(BootError::Header);
     }
     let kernel_size = read_u32(image, 8)?;

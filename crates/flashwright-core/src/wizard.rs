@@ -13,6 +13,7 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -213,6 +214,48 @@ struct HeldPlan {
 ///
 /// The phase starts at [`Phase::Connect`]. [`Self::build_plan`] enters
 /// [`Phase::Review`]. Confirm and dry-run are refused in every other phase.
+struct PendingCleanup {
+    serial: String,
+}
+
+struct SessionJournal {
+    pending: Option<PendingCleanup>,
+}
+
+/// Records a cleanup if a flash ends before the work directory is removed.
+struct CleanupGuard {
+    journal: Arc<Mutex<SessionJournal>>,
+    serial: String,
+    live: bool,
+}
+
+impl CleanupGuard {
+    fn arm(journal: Arc<Mutex<SessionJournal>>, serial: String) -> Self {
+        Self {
+            journal,
+            serial,
+            live: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.live = false;
+    }
+}
+
+impl Drop for CleanupGuard {
+    fn drop(&mut self) {
+        if !self.live {
+            return;
+        }
+        if let Ok(mut journal) = self.journal.lock() {
+            journal.pending = Some(PendingCleanup {
+                serial: self.serial.clone(),
+            });
+        }
+    }
+}
+
 pub struct WizardSession<R: CommandRunner> {
     phase: Phase,
     clock: Box<dyn Clock>,
@@ -221,6 +264,8 @@ pub struct WizardSession<R: CommandRunner> {
     safety: Option<SafetyFacts>,
     backup: Option<BackupState>,
     used: BTreeSet<String>,
+    journal: Arc<Mutex<SessionJournal>>,
+    flash_serial: Option<String>,
 }
 
 impl<R: CommandRunner> WizardSession<R> {
@@ -237,7 +282,21 @@ impl<R: CommandRunner> WizardSession<R> {
             safety: None,
             backup: None,
             used: BTreeSet::new(),
+            journal: Arc::new(Mutex::new(SessionJournal { pending: None })),
+            flash_serial: None,
         }
+    }
+
+    /// Leave Flash. The next plan for this phone starts by removing the work directory.
+    pub fn cancel(&mut self) {
+        if self.phase != Phase::Flash {
+            return;
+        }
+        if let Some(serial) = self.flash_serial.clone() {
+            self.remember_cleanup(&serial);
+        }
+        self.flash_serial = None;
+        self.phase = Phase::Recovery;
     }
 
     /// Read gate facts from the phone. Callers cannot supply them.
@@ -289,6 +348,7 @@ impl<R: CommandRunner> WizardSession<R> {
         if self.phase == Phase::Flash {
             return Err(rejected("A job is already running."));
         }
+        self.prepend_pending_cleanup(&mut request);
         let expires_unix_ms = self.clock.unix_ms().saturating_add(PLAN_TTL_MS);
         if let Err(err) = check_serial(&request) {
             self.note_discard_input();
@@ -508,14 +568,17 @@ impl<R: CommandRunner> WizardSession<R> {
         if let Some(reason) = block_reason(&decisions) {
             return Err(rejected(format!("Blocked: {reason}")));
         }
+        let lead = leading_len(&steps);
         let cleanup_at = cleanup_index(&steps);
-        if finally_steps > cleanup_at {
+        if finally_steps > cleanup_at.saturating_sub(lead) {
             return Err(rejected("Cleanup is longer than the plan."));
         }
         let held = self.held.take().expect("review plan");
         let hash = held.hash.clone();
         self.consume(&hash);
         self.phase = Phase::Flash;
+        self.flash_serial = Some(held.serial.clone());
+        let mut guard = CleanupGuard::arm(Arc::clone(&self.journal), held.serial.clone());
         let writes: Vec<WriteCmd> = held
             .steps
             .iter()
@@ -533,7 +596,10 @@ impl<R: CommandRunner> WizardSession<R> {
             .count();
         let mut lines = Vec::new();
         let mut failed: Option<CoreError> = None;
-        for step in &held.steps[..split] {
+        for step in &held.steps[..lead] {
+            self.run_cleanup_step(step, &mut failed, &mut lines).await;
+        }
+        for step in &held.steps[lead..split] {
             match self.run_planned(&token, step).await {
                 Ok(text) => lines.push(text),
                 Err(err) => {
@@ -557,34 +623,45 @@ impl<R: CommandRunner> WizardSession<R> {
         }
         drop(token);
         for step in &held.steps[cleanup_at..] {
-            let PlanStep::Cleanup(cmd) = step else {
-                if failed.is_none() {
-                    failed = Some(rejected("Cleanup steps cannot perform writes."));
-                }
-                continue;
-            };
-            let blocks = safety::evaluate_step(step, self.safety.as_ref());
-            if let Some(gate) = blocks.first() {
-                if failed.is_none() {
-                    failed = Some(rejected(format!("Blocked: {} {}", gate.id, gate.reason)));
-                }
-                continue;
-            }
-            match self.transport.run_cleanup(cmd).await {
-                Ok(result) if cleanup_ok(&result) => lines.push(result.stdout_text()),
-                Ok(_) | Err(_) => {
-                    if failed.is_none() {
-                        failed = Some(rejected("Cleanup failed."));
-                    }
-                }
-            }
+            self.run_cleanup_step(step, &mut failed, &mut lines).await;
         }
         if let Some(err) = failed {
             self.phase = Phase::Recovery;
             return Err(err);
         }
+        guard.disarm();
+        self.flash_serial = None;
         self.phase = Phase::Done;
         Ok(RunReport { lines })
+    }
+
+    async fn run_cleanup_step(
+        &mut self,
+        step: &PlanStep,
+        failed: &mut Option<CoreError>,
+        lines: &mut Vec<String>,
+    ) {
+        let PlanStep::Cleanup(cmd) = step else {
+            if failed.is_none() {
+                *failed = Some(rejected("Cleanup steps cannot perform writes."));
+            }
+            return;
+        };
+        let blocks = safety::evaluate_step(step, self.safety.as_ref());
+        if let Some(gate) = blocks.first() {
+            if failed.is_none() {
+                *failed = Some(rejected(format!("Blocked: {} {}", gate.id, gate.reason)));
+            }
+            return;
+        }
+        match self.transport.run_cleanup(cmd).await {
+            Ok(result) if cleanup_ok(&result) => lines.push(result.stdout_text()),
+            Ok(_) | Err(_) => {
+                if failed.is_none() {
+                    *failed = Some(rejected("Cleanup failed."));
+                }
+            }
+        }
     }
 
     async fn run_planned(
@@ -601,8 +678,12 @@ impl<R: CommandRunner> WizardSession<R> {
         }
         match step {
             PlanStep::Read(cmd) => {
+                let pulled = matches!(cmd, ReadCmd::AdbHost(crate::cmd::AdbHostRead::Pull { .. }));
                 let result = self.transport.run_read(cmd.clone()).await?;
                 if !result.success_exit() {
+                    return Err(rejected("A read step failed."));
+                }
+                if pulled && parse::parse_pull(&result.stdout_text()) != Verdict::Ok {
                     return Err(rejected("A read step failed."));
                 }
                 Ok(result.stdout_text())
@@ -730,6 +811,37 @@ impl<R: CommandRunner> WizardSession<R> {
             }
         }
     }
+
+    fn remember_cleanup(&self, serial: &str) {
+        if let Ok(mut journal) = self.journal.lock() {
+            journal.pending = Some(PendingCleanup {
+                serial: serial.to_string(),
+            });
+        }
+    }
+
+    fn prepend_pending_cleanup(&self, request: &mut PlanRequest) {
+        let serial = {
+            let Ok(mut journal) = self.journal.lock() else {
+                return;
+            };
+            let Some(pending) = journal.pending.as_ref() else {
+                return;
+            };
+            if pending.serial != request.serial {
+                return;
+            }
+            let serial = pending.serial.clone();
+            journal.pending = None;
+            serial
+        };
+        let Ok(serial) = DeviceSerial::try_from(serial.as_str()) else {
+            return;
+        };
+        request
+            .steps
+            .insert(0, PlanStep::Cleanup(CleanupCmd::RemoveWorkDir { serial }));
+    }
 }
 
 fn rejected(reason: impl Into<String>) -> CoreError {
@@ -739,6 +851,18 @@ fn rejected(reason: impl Into<String>) -> CoreError {
 }
 
 fn ensure_cleanup(steps: &mut Vec<PlanStep>) -> Result<(), CoreError> {
+    let mut leading = Vec::new();
+    while matches!(steps.first(), Some(PlanStep::Cleanup(_))) {
+        leading.push(steps.remove(0));
+    }
+    let result = ensure_cleanup_tail(steps);
+    for (index, step) in leading.into_iter().enumerate() {
+        steps.insert(index, step);
+    }
+    result
+}
+
+fn ensure_cleanup_tail(steps: &mut Vec<PlanStep>) -> Result<(), CoreError> {
     if let Some(index) = steps
         .iter()
         .position(|step| matches!(step, PlanStep::Cleanup(_)))
@@ -777,10 +901,19 @@ fn ensure_cleanup(steps: &mut Vec<PlanStep>) -> Result<(), CoreError> {
     Ok(())
 }
 
-fn cleanup_index(steps: &[PlanStep]) -> usize {
+fn leading_len(steps: &[PlanStep]) -> usize {
     steps
         .iter()
+        .take_while(|step| matches!(step, PlanStep::Cleanup(_)))
+        .count()
+}
+
+fn cleanup_index(steps: &[PlanStep]) -> usize {
+    let start = leading_len(steps);
+    steps[start..]
+        .iter()
         .position(|step| matches!(step, PlanStep::Cleanup(_)))
+        .map(|pos| start + pos)
         .unwrap_or(steps.len())
 }
 
@@ -1471,6 +1604,7 @@ fn write_ok(cmd: &WriteCmd, result: &crate::proc::RunResult) -> bool {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use super::*;
@@ -1762,17 +1896,9 @@ mod tests {
     #[tokio::test]
     async fn cleanup_is_fixed_by_core_and_always_runs() {
         let _gate = gate().await;
+        let open = session;
         let runner = Arc::new(ScriptedRunner::new());
-        let name = if cfg!(windows) { "adb.exe" } else { "adb" };
-        runner.on_fn(name, &["-s", "pixel1", "shell"], |invocation, _| {
-            let remote = invocation.args.get(3).map(String::as_str).unwrap_or("");
-            if remote.contains("'rm'") {
-                ScriptedResponse::ok("")
-            } else {
-                ScriptedResponse::fail(1, "mkdir failed\n")
-            }
-        });
-        let mut session = session(Arc::clone(&runner), 1_000);
+        let mut session = open(Arc::clone(&runner), 1_000);
         let bare = PlanRequest {
             serial: "pixel1".into(),
             dry_run: false,
@@ -1790,24 +1916,69 @@ mod tests {
             }));
         let preview = session.build_plan(bare).await.unwrap();
         assert_eq!(preview.steps.last().unwrap().class, "cleanup");
-        let err = session
-            .confirm_and_run_finally(&preview.plan_hash, 0)
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("write step"));
-        assert!(runner
-            .calls()
-            .iter()
-            .any(|call| { call.args.iter().any(|arg| arg.contains("'rm'")) }));
         let mut bad = explicit.clone();
         bad.steps
             .push(PlanStep::Write(WriteCmd::AdbHost(AdbHostWrite::Reboot {
                 serial: serial(),
                 mode: RebootMode::System,
             })));
-        let mut rejected = session;
-        let err = rejected.build_plan(bad).await.unwrap_err();
+        let err = session.build_plan(bad).await.unwrap_err();
         assert!(err.to_string().contains("cannot perform writes"));
+
+        let runner = Arc::new(ScriptedRunner::new());
+        script_phone(&runner, "pixel1", komodo_props());
+        let rm_tries = Arc::new(AtomicUsize::new(0));
+        let tries = Arc::clone(&rm_tries);
+        runner.on_fn(adb_bin(), &["-s", "pixel1", "shell"], move |call, _| {
+            let remote = call.args.last().map(String::as_str).unwrap_or("");
+            if remote.contains("'rm'") {
+                let seen = tries.fetch_add(1, Ordering::SeqCst);
+                if seen == 0 {
+                    ScriptedResponse::fail(1, "busy\n")
+                } else {
+                    ScriptedResponse::ok("")
+                }
+            } else if remote.contains("-V") {
+                ScriptedResponse::ok("30700\n")
+            } else if remote.contains("magisk") {
+                ScriptedResponse::ok("30.7\n")
+            } else if remote.contains("battery") {
+                ScriptedResponse::ok("level: 80\n")
+            } else if remote.contains("diskstats") {
+                ScriptedResponse::ok("free_bytes: 8000000000\n")
+            } else if remote.contains("getprop") {
+                ScriptedResponse::ok(komodo_props())
+            } else {
+                ScriptedResponse::ok("")
+            }
+        });
+        let mut session = open(Arc::clone(&runner), 1_000);
+        runner.on(
+            adb_bin(),
+            &["-s", "pixel1", "reboot"],
+            ScriptedResponse::fail(1, "FAILED"),
+        );
+        install_tools(session.transport());
+        let mut plan = draft(false, 5_000);
+        plan.steps
+            .push(PlanStep::Cleanup(CleanupCmd::RemoveWorkDir {
+                serial: serial(),
+            }));
+        let preview = session.build_plan(plan).await.unwrap();
+        let err = session
+            .confirm_and_run_finally(&preview.plan_hash, 0)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("write step"));
+        assert!(rm_tries.load(Ordering::SeqCst) >= 2);
+        assert_eq!(session.phase(), Phase::Recovery);
+
+        session.phase = Phase::Flash;
+        session.flash_serial = Some("pixel1".into());
+        session.cancel();
+        assert_eq!(session.phase(), Phase::Recovery);
+        let next = session.build_plan(draft(false, 5_000)).await.unwrap();
+        assert_eq!(next.steps.first().unwrap().class, "cleanup");
     }
 
     fn komodo_serial() -> DeviceSerial {

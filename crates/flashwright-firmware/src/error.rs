@@ -67,6 +67,9 @@ pub enum FirmwareError {
     #[error("the package could not be read")]
     Io(#[source] std::io::Error),
 
+    #[error("CRC-32 check failed")]
+    Crc,
+
     #[error("the package could not be opened")]
     Archive(String),
 }

@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use sha2::{Digest, Sha256};
+
 use crate::gates::check_patched_sha1;
 use crate::image::is_hex;
 use crate::MagiskError;
@@ -36,6 +38,9 @@ pub fn store(root: &Path, meta: &PatchCacheMeta, image: &[u8]) -> Result<PathBuf
         &meta.patched_sha256,
         &meta.config_sha1,
     )?;
+    if !sha256_hex(image).eq_ignore_ascii_case(&meta.patched_sha256) {
+        return Err(MagiskError::PatchedSha1);
+    }
     let dir = root
         .join(&meta.stock_sha1)
         .join(meta.magisk_code.to_string());
@@ -70,16 +75,28 @@ pub fn offer(
     if meta.stock_sha1 != stock_sha1 || meta.magisk_code != magisk_code {
         return Ok(None);
     }
+    let image_path = dir.join(format!("{}.img", meta.patched_sha256));
+    if !image_path.is_file() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&image_path).map_err(|err| MagiskError::Message(err.to_string()))?;
+    if !sha256_hex(&bytes).eq_ignore_ascii_case(&meta.patched_sha256) {
+        return Ok(None);
+    }
     check_patched_sha1(
         stock_sha1,
         stock_sha256,
         &meta.patched_sha256,
         &meta.config_sha1,
     )?;
-    let image_path = dir.join(format!("{}.img", meta.patched_sha256));
-    if image_path.is_file() {
-        Ok(Some(image_path))
-    } else {
-        Ok(None)
+    Ok(Some(image_path))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
     }
+    out
 }

@@ -3,6 +3,8 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "0 6 * * *"
 
 jobs:
   test:
@@ -45,4 +47,13 @@ jobs:
           sudo update-alternatives --set c++ /usr/bin/g++
       - name: Fuzz the boot image parser
         working-directory: crates/flashwright-bootimg
-        run: cargo +nightly fuzz run inspect -- -max_total_time=15 -rss_limit_mb=512
+        env:
+          FUZZ_EVENT: ${{ github.event_name }}
+        run: |
+          LIMIT=60
+          if [ "$FUZZ_EVENT" = "schedule" ]; then
+            LIMIT=300
+          fi
+          cargo +nightly fuzz run inspect -- -max_total_time="$LIMIT" -rss_limit_mb=512
+          cargo +nightly fuzz run header -- -max_total_time="$LIMIT" -rss_limit_mb=512
+          cargo +nightly fuzz run cpio -- -max_total_time="$LIMIT" -rss_limit_mb=512

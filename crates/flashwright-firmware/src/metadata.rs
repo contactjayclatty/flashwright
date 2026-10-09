@@ -42,7 +42,9 @@ pub fn parse_metadata(text: &str) -> PackageMeta {
             .get("post-security-patch-level")
             .or_else(|| map.get("security-patch-level"))
             .cloned(),
-        post_timestamp: map.get("post-timestamp").and_then(|value| value.parse().ok()),
+        post_timestamp: map
+            .get("post-timestamp")
+            .and_then(|value| value.parse().ok()),
         board,
         raw: text.to_string(),
     }

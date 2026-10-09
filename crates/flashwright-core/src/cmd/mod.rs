@@ -12,7 +12,8 @@ mod render;
 pub(crate) use newtypes::MAX_BLOCK_LEN;
 pub use newtypes::{
     AssetRef, ByNameRoot, ByteLen, CmdError, DeviceSerial, DumpsysService, FastbootVar, HostRef,
-    ImageRef, PackageName, PropName, ValidatedDevicePath, WorkFile, MAGISK_PACKAGE,
+    ImageRef, PackageName, PropName, PullName, ValidatedDevicePath, VerifiedHostFile, WorkFile,
+    MAGISK_PACKAGE,
 };
 pub use render::{cleanup_argv, read_argv, sh_quote, write_argv, Rendered, Tool};
 
@@ -42,7 +43,7 @@ pub enum AdbHostRead {
     Pull {
         serial: DeviceSerial,
         remote: PullRemote,
-        dst_name: String,
+        dst_name: PullName,
     },
 }
 

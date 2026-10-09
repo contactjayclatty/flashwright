@@ -9,18 +9,22 @@ const HEADER: usize = 110;
 const MAX_ENTRIES: usize = 4096;
 const MAX_NAME: usize = 256;
 const MAX_FILE: usize = 8 * 1024 * 1024;
-const MAX_CONFIG: usize = 64 * 1024;
+const MAX_CONFIG: usize = 4096;
 const REGULAR: u32 = 0o100000;
 const TYPE_MASK: u32 = 0o170000;
+const EXECUTABLE: u32 = 0o111;
 
 pub(crate) struct MagiskRamdisk {
     pub config: Vec<u8>,
+    pub init: Vec<u8>,
 }
 
 pub(crate) fn walk(archive: &[u8]) -> Result<MagiskRamdisk, BootError> {
     let mut pos = 0usize;
     let mut entries = 0usize;
-    let mut init = false;
+    let mut init = Vec::new();
+    let mut saw_init = false;
+    let mut saw_config = false;
     let mut config = None;
     let mut saw_trailer = false;
     while pos < archive.len() {
@@ -29,7 +33,7 @@ pub(crate) fn walk(archive: &[u8]) -> Result<MagiskRamdisk, BootError> {
         }
         let header_end = pos.checked_add(HEADER).ok_or(BootError::Header)?;
         let header = archive.get(pos..header_end).ok_or(BootError::Header)?;
-        if &header[..6] != b"070701" {
+        if header.get(..6) != Some(b"070701".as_slice()) {
             return Err(BootError::Header);
         }
         let mode = hex8(header, 14)?;
@@ -44,8 +48,10 @@ pub(crate) fn walk(archive: &[u8]) -> Result<MagiskRamdisk, BootError> {
         if name_bytes.last() != Some(&0) {
             return Err(BootError::Header);
         }
-        let name =
-            std::str::from_utf8(&name_bytes[..name_size - 1]).map_err(|_| BootError::Header)?;
+        let name_text = name_bytes
+            .get(..name_size.saturating_sub(1))
+            .ok_or(BootError::Header)?;
+        let name = std::str::from_utf8(name_text).map_err(|_| BootError::Header)?;
         let bare = name.strip_prefix("./").unwrap_or(name);
         if name_rejected(bare) {
             return Err(BootError::Header);
@@ -62,10 +68,28 @@ pub(crate) fn walk(archive: &[u8]) -> Result<MagiskRamdisk, BootError> {
             saw_trailer = true;
             break;
         }
-        if bare == "init" && mode & TYPE_MASK == REGULAR {
-            init = true;
+        if bare == "overlay.d" || bare.starts_with("overlay.d/") {
+            return Err(BootError::Header);
         }
-        if bare == ".backup/.magisk" && file_size <= MAX_CONFIG {
+        if bare == "init" {
+            if saw_init {
+                return Err(BootError::Header);
+            }
+            saw_init = true;
+            let regular = mode & TYPE_MASK == REGULAR;
+            let executable = mode & EXECUTABLE != 0;
+            if regular && executable && !data.is_empty() {
+                init = data.to_vec();
+            }
+        }
+        if bare == ".backup/.magisk" {
+            if saw_config {
+                return Err(BootError::Header);
+            }
+            saw_config = true;
+            if file_size > MAX_CONFIG {
+                return Err(BootError::TooLarge);
+            }
             config = Some(data.to_vec());
         }
         pos = next;
@@ -73,11 +97,11 @@ pub(crate) fn walk(archive: &[u8]) -> Result<MagiskRamdisk, BootError> {
     if !saw_trailer {
         return Err(BootError::Header);
     }
-    if !init {
+    if init.is_empty() {
         return Err(BootError::NoMagiskInit);
     }
     let config = config.ok_or(BootError::MissingSha1)?;
-    Ok(MagiskRamdisk { config })
+    Ok(MagiskRamdisk { config, init })
 }
 
 fn name_rejected(name: &str) -> bool {

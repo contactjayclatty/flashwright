@@ -6,6 +6,17 @@
 //! This crate parses bytes. It does not spawn a process, and it does not
 //! invoke magiskboot. Every buffer is capped.
 
+#![forbid(unsafe_code)]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+    )
+)]
+
 mod cpio;
 mod error;
 mod header;
@@ -30,6 +41,7 @@ pub struct BoundInspection {
     pub ramdisk_format: RamdiskFormat,
     pub config_sha1: String,
     pub patched_sha256: String,
+    pub init_sha256: String,
     pub plan_binding: String,
 }
 
@@ -58,6 +70,7 @@ pub fn inspect_patched_init_boot(
     if patched_sha256.eq_ignore_ascii_case(stock_sha256) {
         return Err(BootError::StockMismatch);
     }
+    let init_sha256 = hex(Sha256::digest(&found.init));
     let plan_binding = bind(
         plan_hash,
         parsed.header_version,
@@ -72,8 +85,24 @@ pub fn inspect_patched_init_boot(
         ramdisk_format: format,
         config_sha1: sha1,
         patched_sha256,
+        init_sha256,
         plan_binding,
     })
+}
+
+/// Fuzz entry for the boot header. It does not panic on hostile input.
+pub fn fuzz_header(image: &[u8]) {
+    let _ = layout(image);
+}
+
+/// Fuzz entry for a newc ramdisk archive.
+pub fn fuzz_cpio(archive: &[u8]) {
+    let _ = walk(archive);
+}
+
+/// Fuzz entry for ramdisk decompression.
+pub fn fuzz_ramdisk(input: &[u8]) {
+    let _ = decompress(input);
 }
 
 fn bind(
@@ -116,8 +145,12 @@ fn hex(bytes: impl AsRef<[u8]>) -> String {
     let bytes = bytes.as_ref();
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0xf) as usize] as char);
+        let high = usize::from(byte >> 4);
+        let low = usize::from(byte & 0xf);
+        if let (Some(high), Some(low)) = (HEX.get(high), HEX.get(low)) {
+            out.push(*high as char);
+            out.push(*low as char);
+        }
     }
     out
 }
@@ -149,6 +182,7 @@ mod tests {
         assert_eq!(report.header_version, 4);
         assert_eq!(report.ramdisk_format, RamdiskFormat::Gzip);
         assert_eq!(report.config_sha1, SHA1);
+        assert_eq!(report.init_sha256.len(), 64);
         assert_ne!(report.patched_sha256, STOCK_SHA256);
         let other = inspect_patched_init_boot(&image, SHA1, STOCK_SHA256, "flp1-other").unwrap();
         assert_ne!(report.plan_binding, other.plan_binding);
@@ -225,6 +259,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn other_header_versions_overlays_and_duplicates_are_refused() {
+        let ramdisk = cpio_with(SHA1, true);
+        assert_eq!(
+            inspect_patched_init_boot(&boot_image(2, &ramdisk), SHA1, STOCK_SHA256, PLAN)
+                .unwrap_err(),
+            BootError::Header
+        );
+        assert_eq!(
+            inspect_patched_init_boot(&boot_image(5, &ramdisk), SHA1, STOCK_SHA256, PLAN)
+                .unwrap_err(),
+            BootError::Header
+        );
+        let overlay = cpio_newc(&[
+            ("overlay.d/custom.rc", b"service x /init".to_vec()),
+            (".backup/.magisk", format!("SHA1={SHA1}\n").into_bytes()),
+            ("init", b"magisk-init".to_vec()),
+        ]);
+        assert_eq!(
+            inspect_patched_init_boot(&boot_image(4, &overlay), SHA1, STOCK_SHA256, PLAN)
+                .unwrap_err(),
+            BootError::Header
+        );
+        let duplicate = cpio_newc(&[
+            ("init", b"magisk-init".to_vec()),
+            ("init", b"magisk-init".to_vec()),
+            (".backup/.magisk", format!("SHA1={SHA1}\n").into_bytes()),
+        ]);
+        assert_eq!(
+            inspect_patched_init_boot(&boot_image(4, &duplicate), SHA1, STOCK_SHA256, PLAN)
+                .unwrap_err(),
+            BootError::Header
+        );
+        let mut huge = b"SHA1=".to_vec();
+        huge.extend(std::iter::repeat_n(b'a', 4096));
+        let large = cpio_newc(&[(".backup/.magisk", huge), ("init", b"magisk-init".to_vec())]);
+        assert_eq!(
+            inspect_patched_init_boot(&boot_image(4, &large), SHA1, STOCK_SHA256, PLAN)
+                .unwrap_err(),
+            BootError::TooLarge
+        );
+        let quiet = cpio_mode(&[
+            (
+                ".backup/.magisk",
+                format!("SHA1={SHA1}\n").into_bytes(),
+                0o100644,
+            ),
+            ("init", b"magisk-init".to_vec(), 0o100644),
+        ]);
+        assert_eq!(
+            inspect_patched_init_boot(&boot_image(4, &quiet), SHA1, STOCK_SHA256, PLAN)
+                .unwrap_err(),
+            BootError::NoMagiskInit
+        );
+    }
+
     fn boot_image(version: u32, ramdisk: &[u8]) -> Vec<u8> {
         let header_size: u32 = if version >= 4 { 1584 } else { 1580 };
         let mut header = vec![0u8; header_size as usize];
@@ -258,7 +348,20 @@ mod tests {
         out
     }
 
+    fn cpio_mode(files: &[(&str, Vec<u8>, u32)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (index, (name, data, mode)) in files.iter().enumerate() {
+            push_entry_mode(&mut out, index as u32 + 1, name, data, *mode);
+        }
+        push_entry(&mut out, 0, "TRAILER!!!", b"");
+        out
+    }
+
     fn push_entry(out: &mut Vec<u8>, ino: u32, name: &str, data: &[u8]) {
+        push_entry_mode(out, ino, name, data, 0o100755);
+    }
+
+    fn push_entry_mode(out: &mut Vec<u8>, ino: u32, name: &str, data: &[u8], mode: u32) {
         let name_bytes = {
             let mut bytes = name.as_bytes().to_vec();
             bytes.push(0);
@@ -267,7 +370,7 @@ mod tests {
         let mut header = String::from("070701");
         let fields = [
             ino,
-            0o100755,
+            mode,
             0,
             0,
             1,
