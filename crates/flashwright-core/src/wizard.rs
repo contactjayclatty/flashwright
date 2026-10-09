@@ -586,8 +586,10 @@ impl<R: CommandRunner> WizardSession<R> {
         }
         let steps = self.held.as_ref().expect("plan").steps.clone();
         let acks = self.held.as_ref().expect("plan").acks.clone();
-        let decisions =
+        let plain = safety::evaluate(&steps, self.safety.as_ref(), self.backup.as_ref());
+        let acked =
             safety::evaluate_acked(&steps, self.safety.as_ref(), self.backup.as_ref(), &acks);
+        let decisions = if acks.is_empty() { plain } else { acked };
         if let Some(reason) = block_reason(&decisions) {
             return Err(rejected(format!("Blocked: {reason}")));
         }
@@ -670,6 +672,13 @@ impl<R: CommandRunner> WizardSession<R> {
             }
             return;
         };
+        if let Some(reason) = evaluate_before_run(step, self.safety.as_ref(), self.backup.as_ref())
+        {
+            if failed.is_none() {
+                *failed = Some(rejected(format!("Blocked: {reason}")));
+            }
+            return;
+        }
         let collected = self.safety.as_ref().map(safety::CollectedFacts::from_ref);
         let blocks = safety::evaluate_step(step, collected.as_ref());
         if let Some(gate) = blocks.first() {
@@ -695,6 +704,11 @@ impl<R: CommandRunner> WizardSession<R> {
     ) -> Result<String, CoreError> {
         if let PlanStep::Write(cmd) = step {
             self.refresh_live(cmd).await?;
+            if let Some(reason) =
+                evaluate_before_run(step, self.safety.as_ref(), self.backup.as_ref())
+            {
+                return Err(rejected(format!("Blocked: {reason}")));
+            }
             let collected = self.safety.as_ref().map(safety::CollectedFacts::from_ref);
             let blocks = safety::evaluate_step(step, collected.as_ref());
             if let Some(gate) = blocks.first() {
@@ -1286,6 +1300,14 @@ fn hash_file(path: &Path) -> Option<String> {
 
 fn empty_facts() -> SafetyFacts {
     SafetyFacts::blank()
+}
+
+fn evaluate_before_run(
+    step: &PlanStep,
+    facts: Option<&SafetyFacts>,
+    backup: Option<&BackupState>,
+) -> Option<String> {
+    block_reason(&safety::evaluate(std::slice::from_ref(step), facts, backup))
 }
 
 fn block_reason(decisions: &[safety::GateDecision]) -> Option<String> {
@@ -2105,6 +2127,37 @@ mod tests {
         assert_eq!(session.phase(), Phase::Recovery);
         let next = session.build_plan(draft(false, 5_000)).await.unwrap();
         assert_eq!(next.steps.first().unwrap().class, "cleanup");
+    }
+
+    #[test]
+    fn a_cleanup_step_is_refused_until_evaluate_passes() {
+        let step = PlanStep::Cleanup(CleanupCmd::RemoveWorkDir { serial: serial() });
+        let reason = evaluate_before_run(&step, None, None).expect("cleanup is gated");
+        assert!(reason.contains("G01"));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_plan_does_not_run_cleanup() {
+        let _gate = gate().await;
+        let runner = Arc::new(ScriptedRunner::new());
+        script_phone(&runner, "pixel1", komodo_props());
+        let mut session = session(Arc::clone(&runner), 1_000);
+        let mut plan = draft(false, 5_000);
+        plan.steps
+            .push(PlanStep::Cleanup(CleanupCmd::RemoveWorkDir {
+                serial: serial(),
+            }));
+        let preview = session.build_plan(plan).await.unwrap();
+        let err = session
+            .confirm_and_run_finally(&preview.plan_hash, 0)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Blocked"));
+        assert_eq!(session.phase(), Phase::Review);
+        assert!(runner
+            .calls()
+            .iter()
+            .all(|call| { call.args.iter().all(|arg| !arg.contains("'rm'")) }));
     }
 
     fn komodo_serial() -> DeviceSerial {
