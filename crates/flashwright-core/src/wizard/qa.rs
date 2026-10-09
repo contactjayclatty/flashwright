@@ -181,11 +181,11 @@ fn plan_hash_is_stable_and_labels_a_dry_run() {
     // Regenerated goldens: dry_run is inside the hash.
     assert_eq!(
         plan.plan_hash,
-        "flp1-904290458f91d47cf0ee00933ffa2640c074b844a504d2695287b8c2bee5e91e"
+        "flp1-099153686831985b3e492b0c7fadaadc011b9dcdb93816a91f845ab33bd7ade9"
     );
     assert_eq!(
         factory.plan_hash,
-        "flp1-937912b265eeab0ded5f5b05d45a4a38b5a8fbfbdb2669f6c7262ab71d68958d"
+        "flp1-1cd1973d380063faecd027ddcb43392c98877da9d5a44f7b272ed6362c9d74b3"
     );
 }
 

@@ -9,6 +9,7 @@ members = [
     "crates/flashwright-firmware",
     "crates/flashwright-plan",
     "crates/flashwright-magisk",
+    "crates/flashwright-bootimg",
     "apps/flashwright-gui/src-tauri",
     "xtask",
 ]
@@ -30,6 +31,8 @@ serde = { version = "1", features = ["derive"] }
 toml = "=0.8.23"
 sha2 = "0.10"
 sha1 = "0.10"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+lz4_flex = { version = "0.11", default-features = false, features = ["frame", "safe-decode", "std"] }
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tracing = "0.1"
 libc = "0.2"

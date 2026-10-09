@@ -1,7 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Clatty Works
 
-//! Step list for preparing a Magisk patch. This crate does not run commands.
+//! Magisk app patch plan.
+//!
+//! This crate does not spawn processes and does not mint write tokens.
+//! [`plan_app_patch`] builds a catalogue plan. The session confirms it.
+
+mod cache;
+mod extract;
+mod gates;
+mod image;
+mod pc;
+mod plan;
+
+pub use cache::{offer, store, PatchCacheMeta};
+pub use extract::{extract_apk_components, DeviceAbi, ExtractedComponent};
+pub use gates::{
+    check_device_space, check_magisk_version, check_patched_sha1, check_region, data_free_bytes,
+    embedded_known_bad, komodo_has_init_boot, patch_partition, KOMODO, LATE_SPL,
+    MIN_CODE_FOR_LATE_SPL,
+};
+pub use image::{ExtractedBootImage, SyntheticInitBoot};
+pub use pc::{validate_patched_init_boot, PatchedCheck};
+pub use plan::{
+    components_from_extract, official_base_apk, plan_app_patch, AppPatchPlan, AppPatchRequest,
+    HostComponent,
+};
 
 use thiserror::Error;
 
@@ -13,6 +37,27 @@ const SCRIPT: &str = include_str!("fl_patch.sh");
 pub enum MagiskError {
     #[error("{HIDDEN_APP}")]
     HiddenOrRenamed,
+
+    #[error("Komodo patches init_boot, not boot.")]
+    KomodoBoot,
+
+    #[error("The LU0 / FIPS region is off-limits.")]
+    Lu0Fips,
+
+    #[error("Not enough free space in /data for the patch.")]
+    DeviceSpace,
+
+    #[error("The patched image does not match the stock image.")]
+    PatchedSha1,
+
+    #[error("This Magisk version is blocked.")]
+    KnownBad,
+
+    #[error("This Magisk version is too old for this security patch.")]
+    MagiskTooOld,
+
+    #[error("{0}")]
+    Message(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,16 +76,7 @@ pub fn patch_script() -> &'static str {
 
 /// Official package only. A missing `codePath` for that package stops the plan.
 pub fn require_official_app(dumpsys_package: &str) -> Result<(), MagiskError> {
-    let mentions = dumpsys_package.contains(OFFICIAL_PACKAGE);
-    let code_path = dumpsys_package.lines().any(|line| {
-        let line = line.trim();
-        line.starts_with("codePath=") && line.contains(OFFICIAL_PACKAGE)
-    });
-    if mentions && code_path {
-        Ok(())
-    } else {
-        Err(MagiskError::HiddenOrRenamed)
-    }
+    official_base_apk(dumpsys_package).map(|_| ())
 }
 
 pub fn prepare_steps(dumpsys_package: &str) -> Result<Vec<PatchStep>, MagiskError> {
@@ -79,5 +115,11 @@ mod tests {
         assert!(script.contains("FL_STOCK_SHA256="));
         assert!(script.contains("FL_OUT="));
         assert!(script.contains("FL_SHA1="));
+        assert!(script.contains("KEEPVERITY=true"));
+        assert!(script.contains("KEEPFORCEENCRYPT=true"));
+        assert!(script.contains("RECOVERYMODE=false"));
+        assert!(script.contains("./boot_patch.sh"));
+        assert!(script.contains("chmod 755"));
+        assert!(!script.contains("[ -f\""));
     }
 }

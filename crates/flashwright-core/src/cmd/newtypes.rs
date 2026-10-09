@@ -4,6 +4,7 @@
 //! Argument newtypes. `TryFrom` rejects; it never rewrites the input.
 
 use std::fmt;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -232,6 +233,22 @@ impl ImageRef {
         }
     }
 
+    /// A host image the plan may name. The path is one argv element.
+    pub fn for_plan(id: u64, path: impl Into<String>, size_bytes: u64) -> Result<Self, CmdError> {
+        let path = path.into();
+        if !host_path_ok(&path) {
+            return Err(CmdError::Rejected {
+                field: "image",
+                issue: "rejected",
+            });
+        }
+        Ok(Self {
+            id,
+            path,
+            size_bytes,
+        })
+    }
+
     pub fn id(&self) -> u64 {
         self.id
     }
@@ -284,6 +301,21 @@ impl AssetRef {
             name: name.into(),
             path: path.into(),
         }
+    }
+
+    /// A host file the plan may push. The path is one argv element.
+    pub fn for_plan(name: impl Into<String>, path: impl Into<String>) -> Result<Self, CmdError> {
+        let path = path.into();
+        if !host_path_ok(&path) {
+            return Err(CmdError::Rejected {
+                field: "asset",
+                issue: "rejected",
+            });
+        }
+        Ok(Self {
+            name: name.into(),
+            path,
+        })
     }
 
     pub(crate) fn path(&self) -> &str {
@@ -445,6 +477,16 @@ fn package_label(label: &str) -> bool {
             .chars()
             .skip(1)
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+}
+
+fn host_path_ok(path: &str) -> bool {
+    if path.is_empty() || path.contains('\0') || path.contains('\n') || path.contains('\r') {
+        return false;
+    }
+    if path.starts_with(r"\\") || path.starts_with("//") {
+        return false;
+    }
+    Path::new(path).is_absolute()
 }
 
 fn code_path_ok(value: &str) -> bool {

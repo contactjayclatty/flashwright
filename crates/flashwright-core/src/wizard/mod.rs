@@ -5,8 +5,7 @@
 //!
 //! The window calls [`Engine`]. Every real flash still goes through
 //! [`WizardSession::confirm_and_run`], which is the only public write entry.
-//! The window engine uses the same accept checks and mints its token with the
-//! same private constructor. Neither path is reachable as a free function.
+//! The window asks `safety::evaluate` for gate results and does not mint a token.
 
 mod device;
 mod engine;
@@ -28,8 +27,8 @@ pub use model::{
     WizardPlan,
 };
 pub use session::{
-    plan_code, plan_hash, Clock, FirmwareClaim, FixedClock, Phase, PlanPreview, PlanRequest,
-    PlanStep, PlanStepView, RunReport, SystemClock, WizardSession,
+    plan_code, plan_hash, Clock, FirmwareClaim, FixedClock, ImageSeal, Phase, PlanPreview,
+    PlanRequest, PlanStep, PlanStepView, RunReport, SystemClock, WizardSession,
 };
 pub use steps::{GateView, Route, Step, StepClass, Tool, SCHEMA};
 

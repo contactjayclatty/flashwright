@@ -25,6 +25,7 @@ pub use forbid::is_forbidden_program;
 pub use lines::StreamLine;
 pub use scripted::{ScriptedResponse, ScriptedRunner};
 pub(crate) use system::SystemRunner;
+pub use system::SystemTools;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

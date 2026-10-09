@@ -20,6 +20,23 @@ use crate::proc::{CommandRunner, ProcError, ProcessGroup, RunLimits, RunResult, 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemRunner;
 
+/// Runs the verified adb and fastboot on this computer.
+///
+/// The spawn implementation stays inside this crate.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemTools;
+
+impl CommandRunner for SystemTools {
+    async fn run(
+        &self,
+        exe: &VerifiedExe,
+        command: &CatalogueCommand,
+        limits: RunLimits,
+    ) -> Result<RunResult, ProcError> {
+        SystemRunner.run(exe, command, limits).await
+    }
+}
+
 impl CommandRunner for SystemRunner {
     async fn run(
         &self,
@@ -206,10 +223,7 @@ impl CommandRunner for SystemRunner {
     }
 }
 
-fn child_command(
-    exe: &VerifiedExe,
-    args: &[String],
-) -> Result<tokio::process::Command, ProcError> {
+fn child_command(exe: &VerifiedExe, args: &[String]) -> Result<tokio::process::Command, ProcError> {
     #[cfg(all(test, unix))]
     if let Some(log) = spawn::exec_trace() {
         let strace = if Path::new("/usr/bin/strace").is_file() {

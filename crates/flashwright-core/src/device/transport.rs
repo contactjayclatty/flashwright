@@ -44,6 +44,7 @@ pub struct PlatformToolsTransport<R: CommandRunner> {
     active: Arc<Mutex<Option<ArmedRun>>>,
     verified: Arc<Mutex<Option<VerifiedTools>>>,
     writes_allowed: Arc<Mutex<bool>>,
+    listener: Arc<Mutex<Option<crate::exe::ListenerImage>>>,
 }
 
 struct VerifiedTools {
@@ -62,6 +63,7 @@ impl<R: CommandRunner> Clone for PlatformToolsTransport<R> {
             active: Arc::clone(&self.active),
             verified: Arc::clone(&self.verified),
             writes_allowed: Arc::clone(&self.writes_allowed),
+            listener: Arc::clone(&self.listener),
         }
     }
 }
@@ -81,6 +83,7 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
             active: Arc::new(Mutex::new(None)),
             verified: Arc::new(Mutex::new(None)),
             writes_allowed: Arc::new(Mutex::new(false)),
+            listener: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -100,11 +103,22 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         fastboot: VerifiedExe,
         listener: Option<crate::exe::ListenerImage>,
     ) {
+        *self.listener.lock().expect("adb listener") = listener.clone();
         *self.verified.lock().expect("verified tools") = Some(VerifiedTools {
             adb,
             fastboot,
             listener,
         });
+    }
+
+    /// Remember the adb server image even when writes stay off.
+    pub(crate) fn note_listener(&self, listener: Option<crate::exe::ListenerImage>) {
+        *self.listener.lock().expect("adb listener") = listener;
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn recorded_listener(&self) -> Option<crate::exe::ListenerImage> {
+        self.listener.lock().expect("adb listener").clone()
     }
 
     /// A directory watcher calls this when a managed platform-tools file changes.
@@ -194,6 +208,20 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
             .await;
         drop(locks);
         result
+    }
+
+    /// Remove the fixed work directory. This does not take a write token.
+    pub(crate) async fn run_cleanup(
+        &self,
+        cmd: &crate::cmd::CleanupCmd,
+    ) -> Result<RunResult, DeviceError> {
+        let rendered =
+            crate::cmd::cleanup_argv(cmd).map_err(|err| DeviceError::Message(err.to_string()))?;
+        let budget = crate::timeouts::cleanup_budget();
+        let adb = self.adb.clone();
+        let command = CatalogueCommand::from_rendered(rendered);
+        self.run_tool(&adb, command, RunLimits::from_budget(&budget))
+            .await
     }
 
     fn reverify_before_write(

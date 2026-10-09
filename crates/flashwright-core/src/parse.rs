@@ -246,6 +246,15 @@ pub fn parse_push(text: &str) -> Verdict {
     }
 }
 
+/// mkdir and rm use fixed paths. Exit 0 is checked by the caller.
+/// A global error line still fails the step.
+pub fn parse_fixed_shell(text: &str) -> Verdict {
+    if let Some(verdict) = global_failure(text) {
+        return verdict;
+    }
+    Verdict::Ok
+}
+
 pub fn parse_patch_script(text: &str) -> Verdict {
     if text.lines().any(|line| line.starts_with("! ")) {
         return Verdict::Failed {

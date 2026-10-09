@@ -1,6 +1,8 @@
-# Fallback when a live init_boot probe is inconclusive.
+# Fallback when a live init_boot probe is inconclusive (spec §3.3).
+# These rows are public device facts used by the fixtures:
 # Pixel 8 (shiba) has init_boot; Pixel 6 (oriole) does not.
-# Pixel 9 Pro XL (komodo) is an A/B phone and an init_boot target.
+# Pixel 9 Pro XL (komodo) patches init_boot. It is an A/B phone and an init_boot target.
+# The longer upstream device table was not copied.
 # The full compatibility table is data/device_compatibility.toml.
 
 [[device]]

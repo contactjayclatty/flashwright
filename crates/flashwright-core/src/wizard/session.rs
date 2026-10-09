@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-use crate::cmd::{DeviceSerial, ReadCmd, WriteCmd};
+use crate::cmd::{CleanupCmd, DeviceSerial, ReadCmd, WriteCmd};
 use crate::device::{PlatformToolsTransport, Slot};
 use crate::parse::{self, Verdict};
 use crate::proc::CommandRunner;
@@ -67,6 +67,16 @@ impl Clock for FixedClock {
 pub enum PlanStep {
     Read(ReadCmd),
     Write(WriteCmd),
+    /// Removes the work directory. This is not a flash write.
+    Cleanup(CleanupCmd),
+}
+
+/// Stock image bound into a patch plan. The hashes are part of the plan hash.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImageSeal {
+    pub role: String,
+    pub sha1: String,
+    pub sha256: String,
 }
 
 /// Firmware the operator selected. The phone identity is read from the device.
@@ -80,6 +90,7 @@ pub struct FirmwareClaim {
     pub bootloader: Option<String>,
     pub image_spl: Option<String>,
     pub image_fingerprint: Option<String>,
+    pub images: Vec<ImageSeal>,
 }
 
 /// What the operator wants done. Core reads every fact from the phone.
@@ -166,6 +177,7 @@ struct PlanBody<'a> {
     dry_run: bool,
     expires_unix_ms: i64,
     steps: &'a [PlanStep],
+    images: &'a [ImageSeal],
     facts: Option<&'a FactSnap>,
     gates: &'a [GateSnap],
     backup: Option<&'a BackupSnap>,
@@ -289,6 +301,7 @@ impl<R: CommandRunner> WizardSession<R> {
             return Err(err);
         }
         seal_image_sizes(&mut request.steps)?;
+        check_images(&request.firmware.images)?;
         let views = step_views(&request.steps)?;
         let facts = self.collect_facts(&request).await;
         let decisions = safety::evaluate(&request.steps, Some(&facts), self.backup.as_ref());
@@ -311,6 +324,7 @@ impl<R: CommandRunner> WizardSession<R> {
         if self.used.contains(&hash) {
             return Err(rejected("That plan was already used."));
         }
+        let files = input_files(&request);
         let preview = PlanPreview {
             plan_code: plan_code(&hash),
             plan_hash: hash.clone(),
@@ -331,7 +345,7 @@ impl<R: CommandRunner> WizardSession<R> {
             backup,
             timeouts,
             acks,
-            files: input_files(&request),
+            files,
             life: PlanLife::Issued,
         });
         self.safety = Some(facts);
@@ -516,12 +530,19 @@ impl<R: CommandRunner> WizardSession<R> {
             .iter()
             .filter_map(|step| match step {
                 PlanStep::Write(cmd) => Some(cmd.clone()),
-                PlanStep::Read(_) => None,
+                PlanStep::Read(_) | PlanStep::Cleanup(_) => None,
             })
             .collect();
         let (plan, token) = mint_confirmed(&held.hash, &held.serial, &writes);
         self.transport.arm(&plan);
-        let split = held.steps.len() - finally_steps;
+        let trailing_cleanup = held
+            .steps
+            .iter()
+            .rev()
+            .take_while(|step| matches!(step, PlanStep::Cleanup(_)))
+            .count();
+        let body_end = held.steps.len() - trailing_cleanup;
+        let split = body_end.saturating_sub(finally_steps);
         let finally_writes = held.steps[split..]
             .iter()
             .filter(|step| matches!(step, PlanStep::Write(_)))
@@ -585,6 +606,13 @@ impl<R: CommandRunner> WizardSession<R> {
                     Ok(result) if write_ok(cmd, &result) => Ok(result.stdout_text()),
                     Ok(_) | Err(_) => Err(rejected("A write step failed.")),
                 }
+            }
+            PlanStep::Cleanup(cmd) => {
+                let result = self.transport.run_cleanup(cmd).await?;
+                if !cleanup_ok(&result) {
+                    return Err(rejected("Cleanup failed."));
+                }
+                Ok(result.stdout_text())
             }
         }
     }
@@ -714,6 +742,7 @@ fn check_serial(request: &PlanRequest) -> Result<(), CoreError> {
         let serial = match step {
             PlanStep::Read(cmd) => cmd.serial().map(|serial| serial.as_str()),
             PlanStep::Write(cmd) => Some(cmd.serial().as_str()),
+            PlanStep::Cleanup(cmd) => Some(cmd.serial().as_str()),
         };
         if let Some(serial) = serial {
             if serial != request.serial {
@@ -735,6 +764,10 @@ fn step_views(steps: &[PlanStep]) -> Result<Vec<PlanStepView>, CoreError> {
             PlanStep::Write(cmd) => (
                 "write",
                 crate::cmd::write_argv(cmd).map_err(|err| rejected(err.to_string()))?,
+            ),
+            PlanStep::Cleanup(cmd) => (
+                "cleanup",
+                crate::cmd::cleanup_argv(cmd).map_err(|err| rejected(err.to_string()))?,
             ),
         };
         views.push(PlanStepView {
@@ -767,6 +800,7 @@ fn hash_plan(
         dry_run: request.dry_run,
         expires_unix_ms,
         steps: &request.steps,
+        images: &request.firmware.images,
         facts,
         gates,
         backup,
@@ -851,6 +885,7 @@ fn step_timeouts(steps: &[PlanStep]) -> Vec<TimeoutSnap> {
         .map(|step| {
             let budget = match step {
                 PlanStep::Read(cmd) => crate::timeouts::read_budget(cmd),
+                PlanStep::Cleanup(_) => crate::timeouts::cleanup_budget(),
                 PlanStep::Write(cmd) => {
                     let size = write_size(cmd);
                     crate::timeouts::write_budget(cmd, size, 1.0).unwrap_or(
@@ -975,8 +1010,33 @@ fn image_path(step: &PlanStep) -> Option<&str> {
             src: crate::cmd::HostRef::Image(image),
             ..
         })) => Some(image.path()),
-        _ => None,
+        PlanStep::Write(_) | PlanStep::Read(_) | PlanStep::Cleanup(_) => None,
     }
+}
+
+fn check_images(images: &[ImageSeal]) -> Result<(), CoreError> {
+    for image in images {
+        if image.role.is_empty()
+            || image.role.len() > 64
+            || !hex_len(&image.sha1, 40)
+            || !hex_len(&image.sha256, 64)
+        {
+            return Err(rejected("The image binding is not valid."));
+        }
+    }
+    Ok(())
+}
+
+fn hex_len(value: &str, len: usize) -> bool {
+    value.len() == len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn cleanup_ok(result: &crate::proc::RunResult) -> bool {
+    result.success_exit()
+        && matches!(
+            parse::parse_fixed_shell(&format!("{}{}", result.stdout_text(), result.stderr_text())),
+            parse::Verdict::Ok | parse::Verdict::Uncertain { .. }
+        )
 }
 
 fn input_files(request: &PlanRequest) -> Vec<InputFile> {
@@ -1701,6 +1761,7 @@ mod tests {
                 bootloader: Some("16.2-100".into()),
                 image_spl: Some("2026-02-01".into()),
                 image_fingerprint: Some("synthetic/komodo/test".into()),
+                images: Vec::new(),
             },
         }
     }

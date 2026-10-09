@@ -211,6 +211,11 @@ fn has_ads(text: &str) -> bool {
     rest.contains(':')
 }
 
+pub(crate) fn hash_regular_file(path: &Path) -> Result<String, ProcError> {
+    let mut file = open_share_read(path)?;
+    hash_file(&mut file)
+}
+
 fn hash_file(file: &mut File) -> Result<String, ProcError> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];

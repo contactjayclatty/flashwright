@@ -22,7 +22,9 @@ use super::steps::{
     assert_no_forbidden_args, factory_steps, ota_steps, prepare_patch_steps, quote_argv, GateView,
     Route, Step, StepClass, SCHEMA,
 };
-use crate::token::mint_confirmed;
+use crate::cmd::{DeviceSerial, FastbootWrite, ImageRef, WriteCmd};
+use crate::safety::{self, GateDecision};
+use crate::wizard::PlanStep;
 use crate::CoreError;
 
 const FIFTEEN_MIN_MS: i64 = 15 * 60 * 1000;
@@ -497,26 +499,14 @@ impl<T: DeviceTransport> Engine<T> {
             .map(|pending| pending.preview.kind)
             .unwrap_or(PlanKind::UpdateKeepRoot);
         self.accept(plan_hash_value, true)?;
-        let info = self.selected_info();
-        let mut lines = vec![
-            log_line("read", "Pre-flight checks passed."),
-            log_line("read", "Backup set is present and verified."),
-        ];
-        let mut blocked = false;
-        for step in &steps {
-            if step.class != StepClass::Write {
-                continue;
-            }
-            if let Some((gate, reason)) = self.block_reason(info.as_ref()) {
-                blocked = true;
-                lines.push(log_line("would", format!("WOULD BLOCK: {gate} {reason}")));
-            } else {
-                lines.push(log_line(
-                    "would",
-                    format!("WOULD RUN: {}", quote_argv(&step.argv)),
-                ));
-            }
-        }
+        let safety_lines = self.safety_lines();
+        let blocked = safety_lines
+            .iter()
+            .any(|line| line.starts_with("WOULD BLOCK"));
+        let lines = safety_lines
+            .into_iter()
+            .map(|line| log_line("would", line))
+            .collect();
         self.job = JobView {
             state: "dry_done".to_string(),
             progress: 100,
@@ -577,13 +567,10 @@ impl<T: DeviceTransport> Engine<T> {
             .pending
             .as_ref()
             .map(|pending| pending.body.active_slot);
-        let serial = self
-            .pending
-            .as_ref()
-            .map(|pending| pending.body.serial.clone())
-            .unwrap_or_default();
+        if let Some(reason) = self.write_block() {
+            return Err(CoreError::Rejected { reason });
+        }
         self.accept(plan_hash_value, false)?;
-        self.mint_for_run(plan_hash_value, &serial);
         let root_version = self
             .selected_info()
             .map(|info| info.root_tool_version)
@@ -877,33 +864,12 @@ impl<T: DeviceTransport> Engine<T> {
             Route::Ota
         };
         let codename = name.split('-').next().unwrap_or("").to_string();
-        let mut gates = self.base_gates();
-        let mut failed = false;
-        let fixture = fixture_sha();
-        if fixture != Some(sha.as_str()) {
-            mark_fail(
-                &mut gates,
-                "G05",
-                "The file checksum does not match the published SHA-256.",
-            );
-            failed = true;
-        } else if !name.to_ascii_lowercase().contains(&sha[..8]) {
-            mark_fail(
-                &mut gates,
-                "G05",
-                "The checksum fragment in the file name does not match the published SHA-256.",
-            );
-            failed = true;
-        }
         let phone_codename = self
             .selected_info()
             .map(|info| info.codename)
             .unwrap_or_default();
-        if codename != phone_codename {
-            mark_fail(&mut gates, "G04", "This package is for a different phone.");
-            failed = true;
-        }
-        if failed {
+        let gates = self.package_gates(name, &sha, &phone_codename);
+        if gates.iter().any(|gate| gate.status == "fail") {
             self.firmware = None;
             self.pending = None;
             self.notice = Some(Notice {
@@ -1123,30 +1089,142 @@ impl<T: DeviceTransport> Engine<T> {
             || pending.preview.kind == PlanKind::RestoreStock
     }
 
-    fn block_reason(
+    /// Facts for the window review. The numbered gates are decided only by
+    /// `safety::evaluate`. These fields are the phone and tool inputs.
+    fn review_facts(&self) -> safety::SafetyFacts {
+        let mut facts = safety::SafetyFacts::synthetic_komodo();
+        let device_unlocked = self
+            .selected_info()
+            .is_none_or(|info| info.bootloader_unlocked);
+        facts.unlocked = Some(self.step_bootloader_ok && device_unlocked);
+        facts.tools_verified = self.exe_ok;
+        facts.tools_match = self.exe_ok;
+        facts.adb_server_ok = self.server_ok;
+        facts.partition_bytes = if self.partition_ok {
+            Some(64 * 1024 * 1024)
+        } else {
+            Some(1)
+        };
+        facts
+    }
+
+    fn catalogue_plan(&self) -> Vec<PlanStep> {
+        let serial = self
+            .pending
+            .as_ref()
+            .map(|pending| pending.body.serial.clone())
+            .or_else(|| self.selected.clone())
+            .unwrap_or_default();
+        let (slot, partition) = if let Some(pending) = &self.pending {
+            (pending.body.target_slot, pending.body.target_partition)
+        } else if let Some(info) = self.selected_info() {
+            let slot = inactive_slot(info.active_slot).unwrap_or(Slot::B);
+            let partition = if info.uses_init_boot {
+                Partition::InitBoot
+            } else {
+                Partition::Boot
+            };
+            (slot, partition)
+        } else {
+            (Slot::B, Partition::InitBoot)
+        };
+        let Ok(serial) = DeviceSerial::try_from(serial.as_str()) else {
+            return Vec::new();
+        };
+        let image = ImageRef::new(1, window_image_path(), 4096);
+        vec![PlanStep::Write(WriteCmd::Fastboot(FastbootWrite::Flash {
+            serial,
+            slot: core_slot(slot),
+            partition: core_partition(partition),
+            image,
+        }))]
+    }
+
+    fn safety_inputs(
         &self,
-        info: Option<&super::device::DeviceInfo>,
-    ) -> Option<(&'static str, &'static str)> {
-        if !self.step_bootloader_ok || info.is_some_and(|info| !info.bootloader_unlocked) {
-            return Some(("G03", "The bootloader is locked."));
+    ) -> (
+        Vec<PlanStep>,
+        safety::SafetyFacts,
+        Option<safety::BackupState>,
+    ) {
+        let steps = self.catalogue_plan();
+        let mut facts = self.review_facts();
+        if let Some(partition) = flash_partition(&steps) {
+            facts.target_partition = partition;
         }
-        if !self.partition_ok {
-            return Some(("G15", "The target partition is missing."));
+        let backup = backup_for(&steps);
+        (steps, facts, backup)
+    }
+
+    fn safety_lines(&self) -> Vec<String> {
+        let (steps, facts, backup) = self.safety_inputs();
+        let decisions = safety::evaluate(&steps, Some(&facts), backup.as_ref());
+        let mut lines = safety::dry_run_lines(&steps, &decisions);
+        if lines.iter().all(|line| !line.starts_with("WOULD BLOCK")) {
+            for step in &steps {
+                let blocks = safety::evaluate_step(step, Some(&facts));
+                if !blocks.is_empty() {
+                    lines = blocks
+                        .iter()
+                        .map(|gate| format!("WOULD BLOCK: {} {}", gate.id, gate.reason))
+                        .collect();
+                    break;
+                }
+            }
         }
-        if !self.exe_ok {
-            return Some(("G21", "A platform-tools file failed its checksum."));
+        lines
+    }
+
+    fn write_block(&self) -> Option<String> {
+        let (steps, facts, backup) = self.safety_inputs();
+        let decisions = safety::evaluate(&steps, Some(&facts), backup.as_ref());
+        if let Some(gate) = decisions
+            .iter()
+            .find(|gate| gate.blocked && gate.severity == safety::Severity::Block)
+        {
+            return Some(format!("Blocked: {} {}", gate.id, gate.reason));
         }
-        if !self.server_ok {
-            return Some(("G22", "The adb server is not the verified binary."));
+        for step in &steps {
+            if let Some(gate) = safety::evaluate_step(step, Some(&facts)).into_iter().next() {
+                return Some(format!("Blocked: {} {}", gate.id, gate.reason));
+            }
         }
         None
     }
 
-    fn mint_for_run(&self, plan_hash_value: &str, serial: &str) {
-        #[cfg(test)]
-        let _gate = crate::token::test_gate_blocking();
-        let (_plan, token) = mint_confirmed(plan_hash_value, serial, &[]);
-        drop(token);
+    fn package_gates(&self, name: &str, sha: &str, phone: &str) -> Vec<GateView> {
+        let (steps, mut facts, backup) = self.safety_inputs();
+        // Package open compares the file with the phone. The boot image
+        // choice is checked later, with the plan.
+        facts.target_partition = crate::device::Partition::InitBoot;
+        let prefix = name.split('-').next().unwrap_or("");
+        if prefix != phone {
+            facts.firmware_codename = prefix.to_string();
+            facts.firmware_filename = name.to_string();
+        } else {
+            let code = facts.device_codename.clone();
+            facts.firmware_codename = code.clone();
+            facts.firmware_filename = format!("{code}-package.zip");
+        }
+        let fixture_ok = fixture_sha() == Some(sha);
+        let fragment_ok = sha.len() >= 8 && name.to_ascii_lowercase().contains(&sha[..8]);
+        if !fixture_ok || !fragment_ok {
+            facts.firmware_sha256 = Some(sha.to_string());
+            facts.image_sha256 = Some("mismatch".to_string());
+        }
+        safety::evaluate(&steps, Some(&facts), backup.as_ref())
+            .into_iter()
+            .filter(|decision| decision.blocked && (decision.id == "G04" || decision.id == "G05"))
+            .map(view_from)
+            .collect()
+    }
+
+    fn gate_views(&self) -> Vec<GateView> {
+        let (steps, facts, backup) = self.safety_inputs();
+        safety::evaluate(&steps, Some(&facts), backup.as_ref())
+            .into_iter()
+            .map(view_from)
+            .collect()
     }
 
     fn selected_info(&self) -> Option<super::device::DeviceInfo> {
@@ -1172,179 +1250,83 @@ impl<T: DeviceTransport> Engine<T> {
     }
 
     fn base_gates(&self) -> Vec<GateView> {
-        let mut gates = vec![
-            gate(
-                "G01",
-                "block",
-                "pass",
-                "Platform tools",
-                "37.0.1 is on the allow list.",
-            ),
-            gate(
-                "G02",
-                "block",
-                "pass",
-                "One phone",
-                "One authorised phone in the device state.",
-            ),
-            gate(
-                "G03",
-                "block",
-                "pass",
-                "Unlocked",
-                "The bootloader is unlocked.",
-            ),
-            gate(
-                "G04",
-                "block",
-                "pass",
-                "Phone match",
-                "The package matches this phone.",
-            ),
-            gate(
-                "G05",
-                "block",
-                "pass",
-                "Checksum",
-                "The pasted SHA-256 matches the file.",
-            ),
-            gate(
-                "G06",
-                "block",
-                "pass",
-                "Full package",
-                "The package is a full A/B update.",
-            ),
-            gate(
-                "G07",
-                "block",
-                "pass",
-                "No downgrade",
-                "The package is newer than the phone.",
-            ),
-            gate(
-                "G08",
-                "block",
-                "pass",
-                "Patch level",
-                "The image patch level matches the package.",
-            ),
-            gate(
-                "G09",
-                "block",
-                "pass",
-                "Patched image",
-                "The patched image matches the stock image that was prepared.",
-            ),
-            gate(
-                "G10",
-                "block",
-                "pass",
-                "Magisk app",
-                "The Magisk app is new enough.",
-            ),
-            gate("G11", "block", "pass", "Battery", "Battery is 82%."),
-            gate(
-                "G12",
-                "block",
-                "pass",
-                "Disk space",
-                "The working disk has enough free space.",
-            ),
-            gate(
-                "G13",
-                "block",
-                "pass",
-                "Phone space",
-                "The phone has enough free space.",
-            ),
-            gate(
-                "G14",
-                "block",
-                "pass",
-                "Backup",
-                "A verified backup set exists.",
-            ),
-            gate(
-                "G15",
-                "block",
-                "pass",
-                "Partition",
-                "The target partition exists and is large enough.",
-            ),
-            gate(
-                "G16",
-                "block",
-                "pass",
-                "Keep data",
-                "The plan does not wipe data or turn off verification.",
-            ),
-            gate(
-                "G17",
-                "ack",
-                "pass",
-                "USB driver",
-                "The driver probe is OK.",
-            ),
-            gate(
-                "G18",
-                "block",
-                "pass",
-                "Bootloader",
-                "The package bootloader is not older.",
-            ),
-            gate(
-                "G19",
-                "ack",
-                "pass",
-                "Minimum bootloader",
-                "The phone bootloader meets the fixture minimum.",
-            ),
-            gate(
-                "G20",
-                "ack",
-                "pass",
-                "No waiting update",
-                "No system update is waiting on the phone.",
-            ),
-            gate(
-                "G21",
-                "block",
-                "pass",
-                "Tool checksum",
-                "adb and fastboot match the allow list.",
-            ),
-            gate(
-                "G22",
-                "block",
-                "pass",
-                "adb server",
-                "The adb server is the verified binary.",
-            ),
-        ];
-        if !self.exe_ok {
-            mark_fail(
-                &mut gates,
-                "G21",
-                "A platform-tools file failed its checksum.",
-            );
-        }
-        if !self.server_ok {
-            mark_fail(
-                &mut gates,
-                "G22",
-                "The adb server is not the verified binary.",
-            );
-        }
-        if !self.partition_ok {
-            mark_fail(&mut gates, "G15", "The target partition is missing.");
-        }
-        gates
+        self.gate_views()
     }
 
     fn pass_gates(&self) -> Vec<GateView> {
         self.base_gates()
     }
+}
+
+fn window_image_path() -> String {
+    if cfg!(windows) {
+        r"C:\flashwright\init_boot.img".to_string()
+    } else {
+        "/var/flashwright/init_boot.img".to_string()
+    }
+}
+
+fn core_slot(slot: Slot) -> crate::device::Slot {
+    match slot {
+        Slot::A => crate::device::Slot::A,
+        Slot::B => crate::device::Slot::B,
+    }
+}
+
+fn core_partition(partition: Partition) -> crate::device::Partition {
+    match partition {
+        Partition::Boot => crate::device::Partition::Boot,
+        Partition::InitBoot => crate::device::Partition::InitBoot,
+        Partition::Vbmeta => crate::device::Partition::Vbmeta,
+        Partition::Bootloader => crate::device::Partition::Bootloader,
+        Partition::Radio => crate::device::Partition::Radio,
+    }
+}
+
+fn flash_partition(steps: &[PlanStep]) -> Option<crate::device::Partition> {
+    for step in steps {
+        if let PlanStep::Write(WriteCmd::Fastboot(FastbootWrite::Flash { partition, .. })) = step {
+            return Some(*partition);
+        }
+    }
+    None
+}
+
+fn backup_for(steps: &[PlanStep]) -> Option<safety::BackupState> {
+    let PlanStep::Write(WriteCmd::Fastboot(FastbootWrite::Flash {
+        serial,
+        slot,
+        partition,
+        ..
+    })) = steps.first()?
+    else {
+        return None;
+    };
+    if *partition == crate::device::Partition::Vbmeta {
+        return None;
+    }
+    Some(safety::BackupState::Verified(safety::BackupSet {
+        set_id: BACKUP_SET_ID.to_string(),
+        manifest_sha256: "window-manifest".to_string(),
+        serial_sha256: safety::sha256_hex(serial.as_str().as_bytes()),
+        slot: *slot,
+        partition: *partition,
+        dir: std::path::PathBuf::new(),
+    }))
+}
+
+fn view_from(decision: GateDecision) -> GateView {
+    let severity = match decision.severity {
+        safety::Severity::Block => "block",
+        safety::Severity::Ack => "ack",
+    };
+    let status = if decision.blocked { "fail" } else { "pass" };
+    let evidence = if decision.reason.is_empty() {
+        "Passed."
+    } else {
+        decision.reason.as_str()
+    };
+    gate(decision.id, severity, status, decision.id, evidence)
 }
 
 fn fixture_sha() -> Option<&'static str> {
@@ -1407,13 +1389,6 @@ fn gate(id: &str, severity: &str, status: &str, title: &str, evidence: &str) -> 
         status: status.to_string(),
         title: title.to_string(),
         evidence: evidence.to_string(),
-    }
-}
-
-fn mark_fail(gates: &mut [GateView], id: &str, evidence: &str) {
-    if let Some(gate) = gates.iter_mut().find(|gate| gate.id == id) {
-        gate.status = "fail".to_string();
-        gate.evidence = evidence.to_string();
     }
 }
 

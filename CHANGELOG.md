@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Process spawn accepts only a hash-checked `adb` or `fastboot` and a catalogue command. A helper path, a shell, or an interpreter is refused. `SystemRunner`, free-form invocations, and `flash_args` are no longer public.
 - `getvar`, `getvar_all`, and `state` take a validated serial and a fastboot variable. `build_plan` is async and stamps a nonce into the plan hash.
 - Confirm re-checks the phone and the input files. The same plan hash cannot be confirmed again. G21 and G22 block a write when platform-tools are not verified, including when no adb server is listening on port 5037.
+- Locating platform-tools records the program listening on 127.0.0.1:5037. A write is refused when that program is not the verified adb, or when it cannot be identified.
 - Fastboot `getvar` is parsed from stdout and stderr, and the slot compare is exact.
 - Sideload uses a 900 second quiet window after a progress percent, and a 300 second watchdog before that.
 - `xtask lint-spawn` scans `apps/` as well as the crates, and it rejects an aliased `Command::new` and `#[expect(clippy::disallowed_methods)]` outside the spawn module.
@@ -26,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Linux CI compares the spawn log with an `strace` `execve` trace. Windows records the same log and does not attach ETW.
 - Safety checks before a patch or a flash: device and build match, security patch, Magisk, bootloader anti-rollback, and slot rules. A dry run prints WOULD RUN or WOULD BLOCK and does not write. Stock boot images are read from the phone, checked against the phone's own SHA-256, and stored with a manifest. A mismatch stops the job.
 - Plan hashes cover the phone facts, gate results, backup, timeouts, and a one-time nonce. A dry run uses up a dry-run plan. Confirm reads the phone again before each write.
+- A phone session runs the verified adb and fastboot on this computer. Writes stay off until the platform-tools allow list has per-file hashes and is device-tested.
+- Phone patch: after you confirm "Patch on your phone?", the Magisk app you already installed patches init_boot. Flashwright then reads that image and checks Magisk's init and the stock SHA-1. Pixel 9 Pro XL (komodo) uses init_boot. A hidden or renamed Magisk app is refused. See `docs/m3.md`.
 - Windows update wizard: sample phones, a hashed plan, and a window that walks through connect, choose, firmware, review, and flash.
 - M1 device layer: platform-tools policy, argv process runner, device scan and props, mode waits, and USB driver classification. See `docs/m1.md`.
 - Typed command catalogue, size-aware timeouts, output parsers, and a review-only confirm that mints the write token inside `flashwright-core`.
