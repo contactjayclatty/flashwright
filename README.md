@@ -47,7 +47,7 @@
     <td align="center" valign="top">
       <img src="assets/icons/dry-run.png" alt="" width="64"><br>
       <strong>Dry-run preview</strong><br>
-      See every image that would be written. Nothing is written yet.
+      See what would run, or why it would be blocked. Nothing is written yet.
     </td>
     <td align="center" valign="top">
       <img src="assets/icons/recovery.png" alt="" width="64"><br>
@@ -59,7 +59,9 @@
 
 <p align="center">Expert mode keeps extra controls within reach.</p>
 
-<p align="center">This build uses sample phones and does not write to a device.</p>
+## Status
+
+Safety checks run before a patch or a flash. They cover the phone, the factory image, the security patch, Magisk, the bootloader, and the slot. A dry run prints WOULD RUN or WOULD BLOCK and does not write. Stock init_boot is read, stored with a SHA-256, and compared with the factory image. A mismatch stops the job. The LU0 and FIPS regions are refused. This build uses sample phones and does not write to a device.
 
 ## Features
 

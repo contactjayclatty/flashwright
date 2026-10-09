@@ -102,6 +102,42 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         *self.active.lock().expect("armed run") = None;
     }
 
+    /// Drop every pending write except the last `keep`, so a cleanup tail can still run.
+    pub(crate) fn keep_last_pending(&self, keep: usize) {
+        let mut guard = self.active.lock().expect("armed run");
+        let Some(active) = guard.as_mut() else {
+            return;
+        };
+        let len = active.pending.len();
+        if len > keep {
+            active.pending.drain(0..len - keep);
+        }
+    }
+
+    /// `(installed, digest still matches, adb server is the verified binary)`.
+    pub(crate) fn tool_gate(&self) -> (bool, bool, bool) {
+        let guard = self.verified.lock().expect("verified tools");
+        let Some(tools) = guard.as_ref() else {
+            return (false, false, false);
+        };
+        let paths = vec![
+            tools.adb.path().to_path_buf(),
+            tools.fastboot.path().to_path_buf(),
+        ];
+        let unchanged = match crate::exe::SharedReadLocks::hold(&paths) {
+            Ok(mut locks) => match locks.hashes() {
+                Ok(hashes) => {
+                    hashes.first().map(String::as_str) == Some(tools.adb.sha256())
+                        && hashes.get(1).map(String::as_str) == Some(tools.fastboot.sha256())
+                }
+                Err(_) => false,
+            },
+            Err(_) => false,
+        };
+        let server = adb_server_matches(&tools.adb, tools.listener.as_ref()).is_ok();
+        (true, unchanged, server)
+    }
+
     pub(crate) fn arm(&self, plan: &crate::token::ConfirmedPlan) {
         *self.active.lock().expect("armed run") = Some(ArmedRun {
             plan_hash: plan.plan_hash().to_string(),
@@ -134,7 +170,11 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
             crate::cmd::Tool::Adb => &self.adb,
             crate::cmd::Tool::Fastboot => &self.fastboot,
         };
-        self.run(program, rendered.args, budget.timeout).await
+        let mut invocation = Invocation::tied(program, rendered.args, budget.timeout);
+        if let Some(watchdog) = budget.watchdog {
+            invocation = invocation.with_watchdog(watchdog);
+        }
+        self.runner.run(invocation).await.map_err(DeviceError::from)
     }
 
     pub async fn stream_read(
@@ -1000,8 +1040,13 @@ fn write_size(cmd: &crate::cmd::WriteCmd) -> u64 {
         crate::cmd::WriteCmd::Fastboot(crate::cmd::FastbootWrite::Flash { image, .. }) => {
             image.size_bytes()
         }
-        crate::cmd::WriteCmd::Fastboot(crate::cmd::FastbootWrite::Update { package, .. })
-        | crate::cmd::WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Sideload { package, .. }) => {
+        crate::cmd::WriteCmd::Fastboot(crate::cmd::FastbootWrite::Update { package, .. }) => {
+            crate::timeouts::update_size_bytes(
+                std::path::Path::new(package.path()),
+                package.size_bytes(),
+            )
+        }
+        crate::cmd::WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Sideload { package, .. }) => {
             package.size_bytes()
         }
         crate::cmd::WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Push { src, .. }) => match src {

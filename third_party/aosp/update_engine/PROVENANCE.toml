@@ -1,0 +1,10 @@
+# Provenance for the vendored update_metadata.proto.
+# Bindings are generated at build time with prost. This file is the source.
+
+repo = "https://android.googlesource.com/platform/system/update_engine"
+path = "update_metadata.proto"
+commit = "dc84c2552b2d4cf00d2a843cb1c091d99d0499f1"
+sha256 = "09da1556e3edb9197ca88103b22ea07230a634c004605d4aa1efee6a6ed6e60d"
+fetched = "2026-10-09"
+license = "Apache-2.0"
+notice = "NOTICE"

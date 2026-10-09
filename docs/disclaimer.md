@@ -27,7 +27,7 @@ M1 reimplements the behaviour listed below in new code. It does not copy PixelFl
 | Stock SHA-1 | `runtime.py` `sha1` lines 3198–3211, same commit | AGPL-3.0-or-later | `flashwright-magisk` | Host SHA-1 of the stock image, via the `sha1` crate. |
 | Patched image check | `pf_modules.py` lines 5020–5119, same commit | AGPL-3.0-or-later | `flashwright-core` `magiskboot` and `flashwright-magisk` | The intent is kept: the patched file must differ from stock, and the stock SHA-1 must be present. `runtime.py` `extract_sha1` lines 3037–3058 and `compare_sha1` lines 3064–3098 are not ported. The check runs `magiskboot` on the PC and requires a full 40-hex `SHA1=` from `.backup/.magisk`. |
 | UI Automator | `pf_modules.py` `drive_magisk` lines 1807–1809, same commit | AGPL-3.0-or-later | Not used | The upstream function returns immediately. It is not ported. |
-| Device, Magisk, and bootloader tables | Not copied | — | Schema only | `data/known_bad_magisk.toml` and `data/min_bootloader.toml` are empty. `data/devices.toml` has three public fixture rows (shiba, oriole, komodo). `data/device_aliases.toml` maps eos to aurora based on upstream issue 325, marked unverified. `data/magiskboot.toml` records that magiskboot is not bundled. |
+| Device alias table | Upstream issue 325, marked unverified | — | `data/device_aliases.toml` | `eos` maps to `aurora`. |
 | payload-dumper-rust | https://github.com/rhythmcache/payload-dumper-rust — path: none copied — commit `ac244d82b54fdd76adf9bf0afcd6edc97f277f7e` (`main`, 2026-09-05) | Apache-2.0 | — | Not used in M1 |
 | payload_dumper | https://github.com/vm03/payload_dumper — path: none copied — commit `2f0a964b8b77c6244e3e12735f85539c938f9c97` | No licence | Not used | Not used (no licence) |
 | busybox | No copy in this repository. Taken from the user's Magisk app (app method) or the user's root install. | GPL-2.0 | Not bundled | Not bundled (GPL-2.0) |
@@ -37,6 +37,26 @@ M1 reimplements the behaviour listed below in new code. It does not copy PixelFl
 | IBM Plex Sans and IBM Plex Mono (OFL-1.1) | https://github.com/IBM/plex commit `763c36ef9117782905ae010056dfbe8fd2653a25`, files under `packages/plex-sans/fonts/complete/woff2` and `packages/plex-mono/fonts/complete/woff2` | SIL Open Font License 1.1 | `apps/flashwright-gui/ui/theme/fonts` | “Plex” is a Reserved Font Name and the family name is unchanged. |
 | Vite 6.4.4 and TypeScript | https://github.com/vitejs/vite and https://github.com/microsoft/TypeScript | MIT (Vite), Apache-2.0 (TypeScript) | Wizard bundle tooling | Dev and build tooling only. |
 | Flashwright UI skin | Original sheet supplied for this product (`flashwright-ui.css`) | AGPL-3.0-or-later, with the repository | `apps/flashwright-gui/ui/theme` | Original Clatty Works skin. Not a third-party logo. |
+
+## Safety tables
+
+These rows are the PixelFlasher tables and checks the safety gates use. The licence is AGPL-3.0-or-later. The commit is `081286d` (`081286d6baf8ac969df29e8b0ab3a5b6ae4cfb54`), tag v10.1.1.1, https://github.com/badabing2005/PixelFlasher. An unreadable bootloader version on a listed phone asks for an acknowledgement. A pending system update is a block. The LU0 and FIPS regions are a Flashwright block; they are not a PixelFlasher table.
+
+| Item | Upstream source (URL, path, lines, commit) | Licence | Where used | Notes |
+| --- | --- | --- | --- | --- |
+| Device compatibility | https://github.com/badabing2005/PixelFlasher/blob/081286d6baf8ac969df29e8b0ab3a5b6ae4cfb54/android_devices.json — entire file — `081286d` | AGPL-3.0-or-later | `data/device_compatibility.toml`, `flashwright-core` | Codename, model, support dates, first API level, bootloader codename, init_boot, and watch flag. Nexus 6P and Pixel C are not A/B. |
+| init_boot lookup | https://github.com/badabing2005/PixelFlasher/blob/081286d6baf8ac969df29e8b0ab3a5b6ae4cfb54/runtime.py — lines 1140–1147 — `081286d` | AGPL-3.0-or-later | `flashwright-core` safety gate G04 | `has_init_boot`. |
+| Build security patch | https://github.com/badabing2005/PixelFlasher/blob/081286d6baf8ac969df29e8b0ab3a5b6ae4cfb54/runtime.py — lines 11791–11856 — `081286d` | AGPL-3.0-or-later | `flashwright-core` safety gates G07 and G08 | Date taken from the build id. A mismatch is a block. |
+| Model match | https://github.com/badabing2005/PixelFlasher/blob/081286d6baf8ac969df29e8b0ab3a5b6ae4cfb54/pf_modules.py — lines 4224–4258 and 5274–5303 — `081286d` | AGPL-3.0-or-later | `flashwright-core` safety gate G04 | Phone, firmware codename, and file name must agree. |
+| Known-bad Magisk | https://github.com/badabing2005/PixelFlasher/blob/081286d6baf8ac969df29e8b0ab3a5b6ae4cfb54/constants.py — line 49 — `081286d` | AGPL-3.0-or-later | `data/known_bad_magisk.toml` | `label:version_code` pairs. A match is a block. |
+| Banned kernels | https://github.com/badabing2005/PixelFlasher/blob/081286d6baf8ac969df29e8b0ab3a5b6ae4cfb54/constants.py — lines 74–101 — `081286d` | AGPL-3.0-or-later | `data/banned_kernels.toml` | The upstream list is missing a comma after `-mokee`, so those two names concatenate. Both names are kept, and the concatenated token is kept. |
+| Unofficial Magisk | https://github.com/badabing2005/PixelFlasher/blob/081286d6baf8ac969df29e8b0ab3a5b6ae4cfb54/constants.py — lines 59–60 — `081286d` | AGPL-3.0-or-later | `data/off_limits.toml` | Alpha and Delta application ids. |
+| Minimum bootloader | https://github.com/badabing2005/PixelFlasher/blob/081286d6baf8ac969df29e8b0ab3a5b6ae4cfb54/constants.py — lines 135–146 — `081286d` | AGPL-3.0-or-later | `data/min_bootloader.toml` | Per-slot minimum. Older than the minimum is a block. |
+| Bootloader compare | https://github.com/badabing2005/PixelFlasher/blob/081286d6baf8ac969df29e8b0ab3a5b6ae4cfb54/runtime.py — lines 11536–11563 and 11698–11724 — `081286d` | AGPL-3.0-or-later | `flashwright-core` safety gates G18 and G19 | `major.minor-patch` order. A missing or unreadable version on a listed phone asks for an acknowledgement. |
+| Tensor anti-rollback | https://github.com/badabing2005/PixelFlasher/blob/081286d6baf8ac969df29e8b0ab3a5b6ae4cfb54/pf_modules.py — lines 6322–6367 — `081286d` | AGPL-3.0-or-later | `data/tensor_arb.toml` | raven, oriole, and bluejay below API 33. A bootloader write is a block. |
+| Slot rules | https://github.com/badabing2005/PixelFlasher/blob/081286d6baf8ac969df29e8b0ab3a5b6ae4cfb54/pf_modules.py — lines 6283–6293 and 6422 — `081286d` | AGPL-3.0-or-later | `data/slot_rules.toml` | Both slots, and `--slot all`, are a block. A write names the inactive slot. |
+| LU0 and FIPS | Not from PixelFlasher | — | `data/off_limits.toml` | A path segment `lu0` or `fips` is gate G25. Wiping data, turning verification off, erasing a partition, and starting a host shell are also refused. |
+| vbmeta | Not from PixelFlasher | — | `flashwright-core` safety gate G26 | A vbmeta flash is read-only. This is the opposite of PixelFlasher `flash_vbmeta_if_needed`. |
 
 ## Trademark notice
 

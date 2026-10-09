@@ -4,7 +4,7 @@
 use flashwright_device::{AliasTable, DeviceTable, KnownBadMagisk, MinBootloaderTable};
 
 #[test]
-fn embedded_tables_parse_and_stay_unseeded() {
+fn embedded_tables_parse() {
     let aliases = AliasTable::embedded().unwrap();
     assert_eq!(aliases.canonical("eos"), "aurora");
     assert_eq!(aliases.canonical("shiba"), "shiba");
@@ -14,6 +14,11 @@ fn embedded_tables_parse_and_stay_unseeded() {
     let komodo = devices.get("komodo").unwrap();
     assert_eq!(komodo.model.as_deref(), Some("Pixel 9 Pro XL"));
     assert!(komodo.has_init_boot);
-    assert!(KnownBadMagisk::embedded().unwrap().version_codes.is_empty());
-    assert!(MinBootloaderTable::embedded().unwrap().entries.is_empty());
+    let magisk = KnownBadMagisk::embedded().unwrap();
+    assert!(magisk.version_codes.contains(&25207));
+    let bootloaders = MinBootloaderTable::embedded().unwrap();
+    assert!(bootloaders
+        .entries
+        .iter()
+        .any(|entry| entry.codename == "oriole" && entry.min == "15.3-13239612"));
 }

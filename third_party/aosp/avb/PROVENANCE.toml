@@ -1,0 +1,15 @@
+# Format reference for the boot-image AVB footer reader.
+# The behaviour follows avbtool info_image for hash-footer images.
+# No avbtool source is copied.
+
+repo = "https://android.googlesource.com/platform/external/avb"
+commit = "761178607206f4cb2af79ed9eec52d8cbd814adb"
+paths = [
+    "libavb/avb_footer.h",
+    "libavb/avb_vbmeta_image.h",
+    "libavb/avb_property_descriptor.h",
+    "avbtool.py",
+]
+fetched = "2026-10-09"
+license = "MIT"
+notice = "NOTICE"

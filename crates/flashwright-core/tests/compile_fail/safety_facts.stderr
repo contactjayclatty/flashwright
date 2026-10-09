@@ -1,0 +1,22 @@
+error[E0603]: struct `SafetyFacts` is private
+ --> tests/compile_fail/safety_facts.rs:2:44
+  |
+2 |     let _facts = flashwright_core::safety::SafetyFacts::blank();
+  |                                            ^^^^^^^^^^^ private struct
+  |
+note: the struct `SafetyFacts` is defined here
+ --> src/safety/mod.rs
+  |
+  | pub(crate) use evaluate::{evaluate, evaluate_acked, evaluate_step, FactEvidence, SafetyFacts};
+  |                                                                                  ^^^^^^^^^^^
+
+error[E0624]: associated function `blank` is private
+ --> tests/compile_fail/safety_facts.rs:2:57
+  |
+2 |     let _facts = flashwright_core::safety::SafetyFacts::blank();
+  |                                                         ^^^^^ private associated function
+  |
+ ::: src/safety/evaluate.rs
+  |
+  |     pub(crate) fn blank() -> Self {
+  |     ----------------------------- private associated function defined here

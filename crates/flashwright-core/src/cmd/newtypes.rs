@@ -12,7 +12,7 @@ use thiserror::Error;
 use crate::device::{Partition, Slot};
 
 pub const MAGISK_PACKAGE: &str = "com.topjohnwu.magisk";
-const MAX_BLOCK_LEN: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_BLOCK_LEN: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CmdError {
@@ -25,7 +25,7 @@ pub enum CmdError {
     ReadOnlyPartition { partition: String },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DeviceSerial(String);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,7 +83,9 @@ pub enum WorkFile {
 }
 
 /// Identity of a core-held host file. Callers pass this id, not a path.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Deserialization stats the file and refuses a size that is not the file length.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ImageRef {
     id: u64,
     path: String,
@@ -100,6 +102,16 @@ pub struct AssetRef {
 pub enum HostRef {
     Image(ImageRef),
     Asset(AssetRef),
+}
+
+impl<'de> Deserialize<'de> for DeviceSerial {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        DeviceSerial::try_from(value.as_str()).map_err(serde::de::Error::custom)
+    }
 }
 
 impl DeviceSerial {
@@ -247,6 +259,38 @@ impl ImageRef {
 
     pub fn size_bytes(&self) -> u64 {
         self.size_bytes
+    }
+
+    pub(crate) fn set_size(&mut self, size_bytes: u64) {
+        self.size_bytes = size_bytes;
+    }
+}
+
+impl<'de> Deserialize<'de> for ImageRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            id: u64,
+            path: String,
+            size_bytes: u64,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let meta = std::fs::metadata(&raw.path).map_err(|_| {
+            serde::de::Error::custom("image file is missing; the size cannot be verified")
+        })?;
+        if !meta.is_file() || meta.len() != raw.size_bytes {
+            return Err(serde::de::Error::custom(
+                "image size does not match the file on disk",
+            ));
+        }
+        Ok(Self {
+            id: raw.id,
+            path: raw.path,
+            size_bytes: meta.len(),
+        })
     }
 }
 
@@ -476,6 +520,28 @@ mod tests {
         let package = PackageName::try_from(MAGISK_PACKAGE).unwrap();
         assert_eq!(package.as_str(), PackageName::magisk_app().as_str());
         assert!(PackageName::try_from("com.topjohnwu.magisk;reboot").is_err());
+    }
+
+    #[test]
+    fn deserialize_rejects_a_bad_serial_and_a_size_that_is_not_the_file() {
+        let bad = serde_json::from_str::<DeviceSerial>("\"has space\"");
+        assert!(bad.is_err());
+        let good = serde_json::from_str::<DeviceSerial>("\"synth-komodo-1\"").unwrap();
+        assert_eq!(good.as_str(), "synth-komodo-1");
+
+        let dir = std::env::temp_dir().join(format!("flashwright-img-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("init_boot.img");
+        std::fs::write(&path, b"0123456789abcdef").unwrap();
+        let path_text = path.to_string_lossy().replace('\\', "\\\\");
+        let claimed = format!("{{\"id\":1,\"path\":\"{path_text}\",\"size_bytes\":8}}");
+        assert!(serde_json::from_str::<ImageRef>(&claimed).is_err());
+        let real = format!("{{\"id\":1,\"path\":\"{path_text}\",\"size_bytes\":16}}");
+        let image = serde_json::from_str::<ImageRef>(&real).unwrap();
+        assert_eq!(image.size_bytes(), 16);
+        let missing = "{\"id\":1,\"path\":\"/no/such/flashwright-image.img\",\"size_bytes\":16}";
+        assert!(serde_json::from_str::<ImageRef>(missing).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -88,7 +88,7 @@ pub(crate) const TAIL_LIMIT: usize = 64 * 1024;
 pub(crate) const OUTPUT_CAP: usize = 8 * 1024 * 1024;
 
 pub(crate) fn push_capped(buf: &mut Vec<u8>, chunk: &[u8], truncated: &mut bool) {
-    if !*truncated && buf.len().saturating_add(chunk.len()) <= OUTPUT_CAP {
+    if buf.len().saturating_add(chunk.len()) <= OUTPUT_CAP {
         buf.extend_from_slice(chunk);
         return;
     }
