@@ -44,7 +44,8 @@ impl CatalogueCommand {
         }
     }
 
-    #[cfg(test)]
+    /// Unix runner tests build a measured adb and pass a short argument list.
+    #[cfg(all(test, unix))]
     pub(crate) fn for_test(tool: Tool, args: Vec<String>) -> Self {
         Self {
             tool,
