@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
 use flashwright_firmware::{open_package, DeviceFacts, OpenRequest, StockPartition};
+use sha2::{Digest, Sha256};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn komodo_factory_when_configured() {
@@ -28,7 +29,6 @@ async fn komodo_factory_when_configured() {
     let published = match std::env::var("FLASHWRIGHT_KOMODO_SHA256") {
         Ok(value) if !value.trim().is_empty() => value,
         _ => {
-            use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             let mut buf = vec![0u8; 1024 * 1024];
             loop {

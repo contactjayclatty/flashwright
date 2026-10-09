@@ -4,7 +4,7 @@
 //! Map a scanned phone onto the facts the firmware opener compares.
 //! The image patch and build date are not fields here.
 
-use crate::device::{BootTarget, DeviceInfo, InitBootPresence, LockState, Mode, RootState};
+use crate::device::DeviceInfo;
 use crate::firmware::DeviceFacts;
 use crate::CoreError;
 
@@ -44,6 +44,7 @@ pub fn facts_from_device(info: &DeviceInfo) -> Result<DeviceFacts, CoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::{BootTarget, InitBootPresence, LockState, Mode, RootState};
 
     fn phone(codename: Option<&str>, date: Option<&str>, spl: Option<&str>) -> DeviceInfo {
         DeviceInfo {
