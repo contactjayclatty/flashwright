@@ -1162,7 +1162,8 @@ impl<T: DeviceTransport> Engine<T> {
         let mut lines = safety::dry_run_lines(&steps, &decisions);
         if lines.iter().all(|line| !line.starts_with("WOULD BLOCK")) {
             for step in &steps {
-                let blocks = safety::evaluate_step(step, Some(&facts));
+                let collected = safety::CollectedFacts::from_ref(&facts);
+                let blocks = safety::evaluate_step(step, Some(&collected));
                 if !blocks.is_empty() {
                     lines = blocks
                         .iter()
@@ -1185,7 +1186,11 @@ impl<T: DeviceTransport> Engine<T> {
             return Some(format!("Blocked: {} {}", gate.id, gate.reason));
         }
         for step in &steps {
-            if let Some(gate) = safety::evaluate_step(step, Some(&facts)).into_iter().next() {
+            let collected = safety::CollectedFacts::from_ref(&facts);
+            if let Some(gate) = safety::evaluate_step(step, Some(&collected))
+                .into_iter()
+                .next()
+            {
                 return Some(format!("Blocked: {} {}", gate.id, gate.reason));
             }
         }

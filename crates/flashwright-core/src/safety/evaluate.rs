@@ -66,6 +66,9 @@ pub(crate) struct SafetyFacts {
     /// Codename read from the phone and stored on the plan. G04 compares firmware to this.
     pub(crate) plan_device: String,
     pub(crate) authorised_devices: u32,
+    /// Serial these facts were read for. G02 requires this phone to be the one attached.
+    pub(crate) bound_serial: String,
+    pub(crate) attached_serials: Vec<String>,
     pub(crate) unlocked: Option<bool>,
     pub(crate) tools_verified: bool,
     pub(crate) tools_match: bool,
@@ -148,6 +151,8 @@ impl SafetyFacts {
             kernel: None,
             plan_device: String::new(),
             authorised_devices: 0,
+            bound_serial: String::new(),
+            attached_serials: Vec::new(),
             unlocked: None,
             tools_verified: false,
             tools_match: false,
@@ -195,6 +200,8 @@ impl SafetyFacts {
             kernel: Some("6.1.0-android14-synthetic".into()),
             plan_device: "komodo".into(),
             authorised_devices: 1,
+            bound_serial: "synth-komodo-1".into(),
+            attached_serials: vec!["synth-komodo-1".into()],
             unlocked: Some(true),
             tools_verified: true,
             tools_match: true,
@@ -267,10 +274,31 @@ pub(crate) fn evaluate_acked(
         .collect()
 }
 
+/// Facts read by core for one plan. A caller cannot fill these in.
+#[derive(Clone, Debug)]
+pub struct CollectedFacts {
+    inner: SafetyFacts,
+}
+
+impl CollectedFacts {
+    pub(crate) fn from_ref(facts: &SafetyFacts) -> Self {
+        Self {
+            inner: facts.clone(),
+        }
+    }
+
+    /// Serial the facts were read for.
+    pub fn bound_serial(&self) -> &str {
+        &self.inner.bound_serial
+    }
+}
+
 /// Gates for one write, including reboot, set-active, and a cleanup step.
 ///
-/// An empty result means this step is not a write. A blocked entry refuses the write.
-pub(crate) fn evaluate_step(step: &PlanStep, facts: Option<&SafetyFacts>) -> Vec<GateDecision> {
+/// `facts` are the facts core collected and hashed into the plan. An empty
+/// result means this step is not a write. A blocked entry refuses the write.
+pub fn evaluate_step(step: &PlanStep, facts: Option<&CollectedFacts>) -> Vec<GateDecision> {
+    let facts = facts.map(|facts| &facts.inner);
     let PlanStep::Write(cmd) = step else {
         return Vec::new();
     };
@@ -581,7 +609,14 @@ fn g17(facts: Option<&SafetyFacts>, image_write: bool) -> (bool, String) {
 
 fn g02(facts: Option<&SafetyFacts>) -> (bool, String) {
     match facts {
-        Some(facts) if facts.authorised_devices == 1 => (false, String::new()),
+        Some(facts)
+            if facts.attached_serials.len() == 1
+                && facts.attached_serials.first().map(String::as_str)
+                    == Some(facts.bound_serial.as_str())
+                && !facts.bound_serial.is_empty() =>
+        {
+            (false, String::new())
+        }
         Some(_) => (true, legacy_message("G02").to_string()),
         None => (
             true,
@@ -1290,7 +1325,10 @@ pub fn spl_from_build(build: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{AdbHostWrite, DeviceSerial, FastbootWrite, ImageRef, RebootMode, WriteCmd};
+    use crate::cmd::{
+        AdbHostWrite, AdbShellWrite, DeviceSerial, FastbootWrite, ImageRef, RebootMode, SuWrite,
+        WriteCmd,
+    };
     use crate::safety::backup::BackupSet;
     use crate::safety::tables::{ported_items, tables};
     use crate::wizard::PlanStep;
@@ -1702,50 +1740,65 @@ mod tests {
             "/var/flashwright/init_boot.img",
         );
         let mut facts = SafetyFacts::komodo_ready();
-        assert!(evaluate_step(&step, Some(&facts)).is_empty());
+        assert!(evaluate_step(&step, Some(&CollectedFacts::from_ref(&facts))).is_empty());
         facts.unlocked = Some(false);
-        assert!(evaluate_step(&step, Some(&facts))
-            .iter()
-            .any(|gate| gate.id == "G03"));
+        assert!(
+            evaluate_step(&step, Some(&CollectedFacts::from_ref(&facts)))
+                .iter()
+                .any(|gate| gate.id == "G03")
+        );
         facts.unlocked = Some(true);
         facts.partition_bytes = Some(10);
-        assert!(evaluate_step(&step, Some(&facts))
-            .iter()
-            .any(|gate| gate.id == "G15"));
+        assert!(
+            evaluate_step(&step, Some(&CollectedFacts::from_ref(&facts)))
+                .iter()
+                .any(|gate| gate.id == "G15")
+        );
         facts.partition_bytes = None;
-        assert!(evaluate_step(&step, Some(&facts))
-            .iter()
-            .any(|gate| gate.id == "G15"));
+        assert!(
+            evaluate_step(&step, Some(&CollectedFacts::from_ref(&facts)))
+                .iter()
+                .any(|gate| gate.id == "G15")
+        );
         let reboot = PlanStep::Write(WriteCmd::AdbHost(AdbHostWrite::Reboot {
             serial: serial(),
             mode: RebootMode::System,
         }));
         facts = SafetyFacts::komodo_ready();
         facts.tools_verified = false;
-        assert!(evaluate_step(&reboot, Some(&facts))
-            .iter()
-            .any(|gate| gate.id == "G21"));
+        assert!(
+            evaluate_step(&reboot, Some(&CollectedFacts::from_ref(&facts)))
+                .iter()
+                .any(|gate| gate.id == "G21")
+        );
         facts.tools_verified = true;
         facts.adb_server_ok = false;
-        assert!(evaluate_step(&reboot, Some(&facts))
-            .iter()
-            .any(|gate| gate.id == "G22"));
+        assert!(
+            evaluate_step(&reboot, Some(&CollectedFacts::from_ref(&facts)))
+                .iter()
+                .any(|gate| gate.id == "G22")
+        );
         let set_active = PlanStep::Write(WriteCmd::Fastboot(FastbootWrite::SetActive {
             serial: serial(),
             slot: Slot::B,
         }));
         facts = SafetyFacts::komodo_ready();
         facts.unlocked = Some(false);
-        assert!(evaluate_step(&set_active, Some(&facts))
-            .iter()
-            .any(|gate| gate.id == "G03"));
+        assert!(
+            evaluate_step(&set_active, Some(&CollectedFacts::from_ref(&facts)))
+                .iter()
+                .any(|gate| gate.id == "G03")
+        );
         let mut huge = flash(Slot::B, Partition::InitBoot, "/var/flashwright/huge.img");
         if let PlanStep::Write(WriteCmd::Fastboot(FastbootWrite::Flash { image, .. })) = &mut huge {
             image.set_size(crate::cmd::MAX_BLOCK_LEN + 1);
         }
-        assert!(evaluate_step(&huge, Some(&SafetyFacts::komodo_ready()))
-            .iter()
-            .any(|gate| gate.id == "G28"));
+        assert!(evaluate_step(
+            &huge,
+            Some(&CollectedFacts::from_ref(&SafetyFacts::komodo_ready()))
+        )
+        .iter()
+        .any(|gate| gate.id == "G28"));
         assert_blocked(
             &preview(
                 &[huge],
@@ -1824,5 +1877,78 @@ mod tests {
         assert!(items
             .iter()
             .any(|item| item.upstream_path == "pf_modules.py"));
+    }
+
+    #[test]
+    fn g02_requires_the_bound_serial_to_be_the_attached_phone() {
+        let backup = verified();
+        let steps = stock_flash();
+        let ready = preview(&steps, Some(&SafetyFacts::komodo_ready()), Some(&backup));
+        assert!(ready.iter().all(|line| !line.contains("G02")), "{ready:?}");
+
+        let mut other = SafetyFacts::komodo_ready();
+        other.attached_serials = vec!["other-phone".into()];
+        other.authorised_devices = 1;
+        assert_blocked(&preview(&steps, Some(&other), Some(&backup)), "G02");
+
+        let mut two = SafetyFacts::komodo_ready();
+        two.attached_serials = vec!["synth-komodo-1".into(), "other-phone".into()];
+        two.authorised_devices = 2;
+        assert_blocked(&preview(&steps, Some(&two), Some(&backup)), "G02");
+
+        let mut unbound = SafetyFacts::komodo_ready();
+        unbound.bound_serial.clear();
+        assert_blocked(&preview(&steps, Some(&unbound), Some(&backup)), "G02");
+        assert_blocked(&preview(&steps, None, Some(&backup)), "G02");
+    }
+
+    #[test]
+    fn a_missing_read_blocks_the_gate() {
+        let backup = verified();
+        let steps = stock_flash();
+
+        let mut facts = SafetyFacts::komodo_ready();
+        facts.tools_verified = false;
+        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G01");
+
+        let mut facts = SafetyFacts::komodo_ready();
+        facts.firmware_sha256 = None;
+        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G05");
+        facts.firmware_sha256 = Some("synthetic-sha".into());
+        facts.image_sha256 = None;
+        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G05");
+
+        let update = PlanStep::Write(WriteCmd::Fastboot(FastbootWrite::Update {
+            serial: serial(),
+            slot: Slot::B,
+            package: ImageRef::new(2, "/var/flashwright/ota.zip", 4096),
+        }));
+        let mut facts = SafetyFacts::komodo_ready();
+        facts.full_ota = false;
+        assert_blocked(&preview(&[update], Some(&facts), Some(&backup)), "G06");
+
+        let patch = PlanStep::Write(WriteCmd::Su(SuWrite::RunPatchScript { serial: serial() }));
+        let mut facts = SafetyFacts::komodo_ready();
+        facts.patched_sha1 = None;
+        assert_blocked(&preview(&[patch], Some(&facts), Some(&backup)), "G09");
+        let shell = PlanStep::Write(WriteCmd::AdbShell(AdbShellWrite::RunPatchScript {
+            serial: serial(),
+        }));
+        facts.patched_sha1 = Some("synthetic-sha1".into());
+        facts.stock_sha1 = None;
+        assert_blocked(&preview(&[shell], Some(&facts), Some(&backup)), "G09");
+
+        let mut facts = SafetyFacts::komodo_ready();
+        facts.battery_percent = None;
+        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G11");
+        facts.battery_percent = Some(80);
+        facts.host_free_bytes = None;
+        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G12");
+        facts.host_free_bytes = Some(8 * 1024 * 1024 * 1024);
+        facts.device_free_bytes = None;
+        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G13");
+        facts.device_free_bytes = Some(8 * 1024 * 1024 * 1024);
+        facts.driver_ok = false;
+        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G17");
     }
 }
