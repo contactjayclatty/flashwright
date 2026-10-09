@@ -1,6 +1,7 @@
 import type {
   DeviceInfo,
   EngineApi,
+  FirmwareRef,
   GateView,
   JobView,
   Notice,
@@ -245,6 +246,67 @@ export class MockEngine implements EngineApi {
 
   async scan(): Promise<Snapshot> {
     this.notice = null;
+    return this.snapshot();
+  }
+
+  async subscribe(): Promise<void> {
+    await this.snapshot();
+  }
+
+  async toolsStatus(): Promise<Snapshot> {
+    return this.snapshot();
+  }
+
+  async toolsPickFolder(): Promise<Snapshot> {
+    return this.snapshot();
+  }
+
+  async toolsImportZip(): Promise<Snapshot> {
+    return this.snapshot();
+  }
+
+  async pickFirmware(): Promise<FirmwareRef> {
+    return { id: "fw-harbor", display_name: FIXTURE_OTA_NAME, size: 34 * 1024 * 1024 };
+  }
+
+  async preparePatch(firmwareId: string): Promise<Snapshot> {
+    if (!this.firmwareOk || firmwareId !== "fw-harbor") {
+      this.notice = { level: "block", message: "Check a package before preparing a patch.", gates: [] };
+      return this.snapshot();
+    }
+    this.notice = {
+      level: "info",
+      message: "Patch on your phone? Nothing is flashed until you confirm a plan.",
+      gates: [],
+    };
+    return this.snapshot();
+  }
+
+  async ackGate(planHash: string, gateId: string): Promise<Snapshot> {
+    const plan = this.plan();
+    if (!plan || plan.plan_hash !== planHash) {
+      throw new Error("That plan code was not issued by Flashwright.");
+    }
+    const row = plan.gates.find((item) => item.id === gateId);
+    if (!row) {
+      throw new Error("That check is not on this plan.");
+    }
+    return this.snapshot();
+  }
+
+  async backupsList(): Promise<Snapshot> {
+    return this.snapshot();
+  }
+
+  async restorePlan(setId: string, item: string): Promise<Snapshot> {
+    if (setId !== "4f2a9c01-0000-7000-8000-000000000001" || item.length === 0) {
+      throw new Error("That backup is not available.");
+    }
+    this.notice = {
+      level: "info",
+      message: "Restore still needs its own review and confirm.",
+      gates: [],
+    };
     return this.snapshot();
   }
 

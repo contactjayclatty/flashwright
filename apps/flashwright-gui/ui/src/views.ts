@@ -187,9 +187,9 @@ function gateList(gates: GateView[]): HTMLElement {
 }
 
 function logLine(line: LogLine): HTMLElement {
-  const tone = line.level === "ok" ? "ok" : line.level === "error" ? "warn" : line.level === "would" ? "p" : "";
+  const tone = line.level === "ok" ? "fw-log-ok" : line.level === "error" ? "fw-log-warn" : line.level === "would" ? "fw-log-prompt" : "";
   const text = el("span", tone ? { class: tone } : {}, [line.text]);
-  return el("div", { class: "fw-log-line" }, [el("span", { class: "t" }, [`${line.ts} `]), text]);
+  return el("div", { class: "fw-log-line" }, [el("span", { class: "fw-log-time" }, [`${line.ts} `]), text]);
 }
 
 export function mountLog(host: HTMLElement, lines: LogLine[]): void {

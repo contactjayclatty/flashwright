@@ -43,6 +43,7 @@ fn check(root: &Path) -> Result<(), String> {
     walk(&root.join("xtask"), &mut files)?;
     lint_spawn(root, &files)?;
     lint_shell_names(root, &files)?;
+    lint_window(root)?;
     let license = fs::read_to_string(root.join("LICENSE")).map_err(|err| err.to_string())?;
     if !license.contains("GNU AFFERO GENERAL PUBLIC LICENSE") {
         return Err("LICENSE is missing the GNU AGPL heading".into());
@@ -179,6 +180,106 @@ fn contains_token(line: &str, needle: &str) -> bool {
             .next()
             .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
     })
+}
+
+fn lint_window(root: &Path) -> Result<(), String> {
+    let workspace = fs::read_to_string(root.join("Cargo.toml")).map_err(|err| err.to_string())?;
+    if workspace.contains("flashwright-wizard") || root.join("crates/flashwright-wizard").exists() {
+        return Err("the standalone wizard crate is still in the workspace".into());
+    }
+    let gui_manifest = root.join("apps/flashwright-gui/src-tauri/Cargo.toml");
+    let gui = fs::read_to_string(&gui_manifest).map_err(|err| err.to_string())?;
+    for banned in [
+        "tauri-plugin-fs",
+        "tauri-plugin-shell",
+        "tauri-plugin-http",
+        "tauri-plugin-process",
+        "tauri-plugin-updater",
+        "devtools",
+    ] {
+        if gui.contains(banned) {
+            return Err(format!("the window shell must not depend on {banned}"));
+        }
+    }
+    let config = fs::read_to_string(root.join("apps/flashwright-gui/src-tauri/tauri.conf.json"))
+        .map_err(|err| err.to_string())?;
+    if config.contains("devCsp") || config.contains("devtools") {
+        return Err("the window config enables a dev content policy or devtools".into());
+    }
+    if !config.contains("\"create\": false") {
+        return Err("the main window must be created by the shell".into());
+    }
+    if !config.contains("\"freezePrototype\": true") {
+        return Err("the window config must freeze prototypes".into());
+    }
+    let capability_dir = root.join("apps/flashwright-gui/src-tauri/capabilities");
+    let mut capabilities = Vec::new();
+    for entry in fs::read_dir(&capability_dir).map_err(|err| err.to_string())? {
+        let path = entry.map_err(|err| err.to_string())?.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            capabilities.push(path);
+        }
+    }
+    if capabilities.len() != 1
+        || capabilities[0].file_name().and_then(|name| name.to_str()) != Some("main-window.json")
+    {
+        return Err("the window must grant exactly capabilities/main-window.json".into());
+    }
+    let capability = fs::read_to_string(&capabilities[0]).map_err(|err| err.to_string())?;
+    for banned in ["core:default", "dialog:", "opener:", "\"remote\""] {
+        if capability.contains(banned) {
+            return Err(format!("the window capability contains {banned}"));
+        }
+    }
+    let commands_src =
+        fs::read_to_string(root.join("apps/flashwright-gui/src-tauri/src/commands.rs"))
+            .map_err(|err| err.to_string())?;
+    let commands = phase1_commands(&commands_src)?;
+    let shell = fs::read_to_string(root.join("apps/flashwright-gui/src-tauri/src/shell.rs"))
+        .map_err(|err| err.to_string())?;
+    let client = fs::read_to_string(root.join("apps/flashwright-gui/ui/src/ipc.ts"))
+        .map_err(|err| err.to_string())?;
+    for command in &commands {
+        let allow = format!("\"allow-{}\"", command.replace('_', "-"));
+        if !capability.contains(&allow) {
+            return Err(format!("the window capability is missing {allow}"));
+        }
+        if !shell.contains(&format!("fn {command}(")) {
+            return Err(format!("{command} is not a window handler"));
+        }
+        if !client.contains(&format!("\"{command}\"")) {
+            return Err(format!("the window client does not call {command}"));
+        }
+    }
+    Ok(())
+}
+
+fn phase1_commands(text: &str) -> Result<Vec<String>, String> {
+    let start = text
+        .find("PHASE1_COMMANDS")
+        .ok_or("PHASE1_COMMANDS is missing")?;
+    let slice = &text[start..];
+    let marker = slice.find("= &[").ok_or("the command list is missing")?;
+    let body_start = marker + "= &[".len();
+    let body_end = slice[body_start..]
+        .find(']')
+        .ok_or("the command list is missing")?
+        + body_start;
+    let mut names = Vec::new();
+    for token in slice[body_start..body_end].split(',') {
+        let name = token.trim().trim_matches('"');
+        if name.is_empty() {
+            continue;
+        }
+        if !name.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_') {
+            return Err(format!("unexpected command token {name}"));
+        }
+        names.push(name.to_string());
+    }
+    if names.is_empty() {
+        return Err("PHASE1_COMMANDS is empty".into());
+    }
+    Ok(names)
 }
 
 fn display(root: &Path, path: &Path) -> String {

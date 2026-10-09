@@ -61,6 +61,14 @@
 
 <p align="center">This build uses sample phones and does not write to a device.</p>
 
+## Status
+
+The Windows 11 wizard walks through connect, choose, firmware, review, and flash. A plan can be confirmed only from the review step, and only once. Platform-tools are not bundled. Real phones stay off in this build.
+
+Sign-off: M5 PROVISIONAL (mocks only). T1.3, T1.11, and T4.15 stay blocked until they are recorded on a phone.
+
+Android, Google, and Pixel are trademarks of Google LLC. Magisk is a project by topjohnwu. They are named descriptively. Flashwright is not affiliated with or endorsed by them.
+
 ## The wizard
 
 <table>

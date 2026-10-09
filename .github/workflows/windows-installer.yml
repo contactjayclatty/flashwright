@@ -54,6 +54,9 @@ jobs:
       - name: Install wizard UI
         working-directory: apps/flashwright-gui/ui
         run: npm ci
+      - name: Window keyboard and scale checks
+        working-directory: apps/flashwright-gui/ui
+        run: npm test
       - name: Install a compiler new enough for the window shell
         run: rustup toolchain install stable
       - name: Build NSIS installer
@@ -93,3 +96,31 @@ jobs:
           }
           $lines -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
           $files | ForEach-Object { Write-Output "$($_.FullName) $($_.Length)" }
+      - name: Capture the WebView2 log
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "target/release/flashwright-gui.exe",
+            "apps/flashwright-gui/src-tauri/target/release/flashwright-gui.exe"
+          )
+          $exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $exe) { throw "The window executable was not produced" }
+          $log = Join-Path $env:RUNNER_TEMP "webview2.log"
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--enable-logging --v=1 --log-file=`"$log`""
+          $proc = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 8
+          $alive = -not $proc.HasExited
+          if (-not $alive) {
+            Write-Output "window exit code $($proc.ExitCode)"
+          }
+          if (Test-Path $log) {
+            Get-Content $log -TotalCount 40
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "WebView2 log captured ($((Get-Item $log).Length) bytes)."
+          } elseif ($alive) {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "The window stayed open. WebView2 did not write a log file."
+          }
+          if ($alive) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+          Get-Process -Name msedgewebview2 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          if (-not $alive -and -not (Test-Path $log)) {
+            throw "The window exited before a WebView2 log was written"
+          }

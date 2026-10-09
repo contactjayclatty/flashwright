@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The update wizard confirms a plan once from the review step. The window shell grants one capability, and sample phones stay out of the release bundle.
 - Windows update wizard: sample phones, a hashed plan, and a window that walks through connect, choose, firmware, review, and flash.
 - M1 device layer: platform-tools policy, argv process runner, device scan and props, mode waits, and USB driver classification. See `docs/m1.md`.
 - Typed command catalogue, size-aware timeouts, output parsers, and a review-only confirm that mints the write token inside `flashwright-core`.

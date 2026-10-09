@@ -9,7 +9,7 @@ const repoRoot = path.resolve(uiRoot, "../../..");
 const outDir = process.env.FLASHWRIGHT_SCREENSHOT_DIR
   ? path.resolve(process.env.FLASHWRIGHT_SCREENSHOT_DIR)
   : path.join(repoRoot, "docs/wizard/screenshots");
-const previewUrl = "http://127.0.0.1:4173/";
+const previewUrl = "http://127.0.0.1:1421/";
 
 const chrome = [
   "/usr/bin/google-chrome",
@@ -40,7 +40,7 @@ async function previewReady() {
     }
     await wait(200);
   }
-  throw new Error("Vite preview did not start");
+  throw new Error("Vite dev server did not start");
 }
 
 async function save(page, name) {
@@ -50,9 +50,16 @@ async function save(page, name) {
 
 async function assertClean(page) {
   const text = await page.locator("body").innerText();
+  const allowed =
+    text
+      .replaceAll("Magisk app", "")
+      .replaceAll("Magisk's patcher", "")
+      .replaceAll("Google Pixel", "")
+      .replaceAll("trademarks of Google LLC", "")
+      .replaceAll("Magisk is a project by topjohnwu", "");
   const banned = [/pixelflasher/i, /\bpixel\b/i, /magisk/i, /\bgoogle\b/i, /flintlock/i];
   for (const rule of banned) {
-    if (rule.test(text)) {
+    if (rule.test(allowed)) {
       throw new Error(`Banned word ${rule} on the wizard`);
     }
   }
@@ -62,11 +69,11 @@ async function assertClean(page) {
   }
 }
 
-const preview = spawn(
-  "npx",
-  ["vite", "preview", "--host", "127.0.0.1", "--port", "4173", "--strictPort"],
-  { cwd: uiRoot, stdio: "inherit" },
-);
+const preview = spawn("npx", ["vite", "--host", "127.0.0.1", "--port", "1421", "--strictPort"], {
+  cwd: uiRoot,
+  stdio: "inherit",
+  shell: false,
+});
 
 try {
   await mkdir(outDir, { recursive: true });
