@@ -26,7 +26,6 @@ impl CommandRunner for SystemRunner {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        let cwd = invocation.current_dir.clone().unwrap_or(tools_dir.clone());
         command
             .args(&invocation.args)
             .env_remove("ANDROID_SERIAL")
@@ -35,7 +34,7 @@ impl CommandRunner for SystemRunner {
             .env_remove("ANDROID_ADB_SERVER_PORT")
             .env("ANDROID_PRODUCT_OUT", "")
             .env("PATH", path_with_tools(&tools_dir))
-            .current_dir(cwd)
+            .current_dir(&tools_dir)
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

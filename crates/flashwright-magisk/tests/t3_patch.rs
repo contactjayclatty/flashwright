@@ -15,8 +15,7 @@ use flashwright_magisk::{
     check_device_space, check_magisk_version, check_patched_sha1, check_region, embedded_known_bad,
     extract_apk_components, komodo_has_init_boot, offer, patch_partition, plan_app_patch, store,
     validate_patched_init_boot, AppPatchRequest, DeviceAbi, ExtractedBootImage, HostComponent,
-    MagiskError, MagiskbootPolicy, PatchCacheMeta, PatchedCheck, SyntheticInitBoot, FINALLY_STEPS,
-    HIDDEN_APP,
+    MagiskError, PatchCacheMeta, PatchedCheck, SyntheticInitBoot, HIDDEN_APP,
 };
 use sha2::{Digest, Sha256};
 use zip::write::SimpleFileOptions;
@@ -68,7 +67,7 @@ async fn unconfirmed_plan_spawns_nothing() {
     .unwrap();
     assert_eq!(plan.title, "Patch on your phone?");
     assert_eq!(plan.button, "Patch now");
-    assert_eq!(plan.finally_steps, FINALLY_STEPS);
+    assert_eq!(plan.draft.images[0].sha1, stock.sha1_hex());
     let preview = session.build_plan(plan.draft).unwrap();
     let blob = preview
         .steps
@@ -82,13 +81,13 @@ async fn unconfirmed_plan_spawns_nothing() {
     assert!(!blob.contains("'pm'"));
     assert!(!blob.contains(" pm "));
     let err = session
-        .confirm_and_run_finally("flp1-not-issued", FINALLY_STEPS)
+        .confirm_and_run_finally("flp1-not-issued")
         .await
         .unwrap_err();
     assert!(err.to_string().contains("not issued"));
     assert!(runner.calls().is_empty());
     let listed = session.dry_run(&preview.plan_hash).unwrap();
-    assert!(listed.iter().any(|line| line.starts_with("WOULD RUN:")));
+    assert!(listed.iter().any(|line| line.starts_with("WOULD BLOCK:")));
     assert!(runner.calls().is_empty());
 }
 
@@ -112,7 +111,7 @@ async fn confirmed_app_patch_runs_three_times() {
         .unwrap();
         let preview = session.build_plan(plan.draft).unwrap();
         let report = session
-            .confirm_and_run_finally(&preview.plan_hash, plan.finally_steps)
+            .confirm_and_run_finally(&preview.plan_hash)
             .await
             .unwrap();
         let text = report.lines.join("\n");
@@ -152,7 +151,7 @@ async fn cleanup_runs_after_a_script_failure() {
     .unwrap();
     let preview = session.build_plan(plan.draft).unwrap();
     let err = session
-        .confirm_and_run_finally(&preview.plan_hash, plan.finally_steps)
+        .confirm_and_run_finally(&preview.plan_hash)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("write step"));
@@ -204,7 +203,7 @@ fn komodo_patches_init_boot_and_blocks_lu0() {
 
 #[test]
 fn magisk_gates_and_device_space() {
-    assert!(embedded_known_bad().unwrap().is_empty());
+    assert!(embedded_known_bad().unwrap().contains(&25207));
     assert_eq!(
         check_magisk_version(27_000, "2025-12-01", &[]).unwrap_err(),
         MagiskError::MagiskTooOld
@@ -290,105 +289,49 @@ fn strict_sha1_and_cache_reuse() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-#[tokio::test]
-async fn pc_magiskboot_checks_the_ramdisk() {
-    let dir = std::env::temp_dir().join("flashwright-m3-magiskboot");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let tool_path = dir.join(if cfg!(windows) {
-        "magiskboot.exe"
-    } else {
-        "magiskboot"
-    });
-    std::fs::write(&tool_path, b"magiskboot-stand-in").unwrap();
-    let digest = hex(Sha256::digest(b"magiskboot-stand-in"));
+#[test]
+fn the_pc_parser_checks_the_ramdisk() {
     let stock = SyntheticInitBoot::komodo();
-    let image = dir.join("init_boot.img");
-    std::fs::write(&image, stock.bytes()).unwrap();
-    let work = dir.join("work");
-    std::fs::create_dir_all(&work).unwrap();
-    let patched = hex(Sha256::digest(b"patched-init-boot-stand-in"));
-    let runner = ScriptedRunner::new();
-    let name = tool_path.file_name().unwrap().to_str().unwrap().to_string();
-    runner.on(
-        &name,
-        &["unpack"],
-        ScriptedResponse::ok("RAMDISK_FMT     [gzip]\n"),
-    );
-    runner.on(
-        &name,
-        &["cpio", "ramdisk.cpio", "test"],
-        ScriptedResponse::ok("Magisk detected\n"),
-    );
-    runner.on(
-        &name,
-        &["cpio", "ramdisk.cpio", "exists", "init"],
-        ScriptedResponse::ok(""),
-    );
-    runner.on(
-        &name,
-        &["cpio", "ramdisk.cpio", "extract"],
-        ScriptedResponse::ok(format!("SHA1={}\n", stock.sha1_hex())),
-    );
-    let report = validate_patched_init_boot(
-        &runner,
-        pc_check(&tool_path, &digest, &image, &work, &stock, &patched),
-    )
-    .await
+    let image = patched_cpio_init_boot(stock.sha1_hex());
+    let report = validate_patched_init_boot(PatchedCheck {
+        patched: &image,
+        stock_sha1: stock.sha1_hex(),
+        stock_sha256: stock.sha256_hex(),
+        plan_hash: "flp1-parser",
+    })
     .unwrap();
-    assert_eq!(report.ramdisk_format, "gzip");
-    assert!(report.magisk_init);
+    assert_eq!(report.ramdisk_format.as_str(), "cpio");
     assert_eq!(report.config_sha1, stock.sha1_hex());
+    assert_ne!(report.patched_sha256, stock.sha256_hex());
+    let other = validate_patched_init_boot(PatchedCheck {
+        patched: &image,
+        stock_sha1: stock.sha1_hex(),
+        stock_sha256: stock.sha256_hex(),
+        plan_hash: "flp1-other",
+    })
+    .unwrap();
+    assert_ne!(report.plan_binding, other.plan_binding);
 
-    let mismatch = ScriptedRunner::new();
-    mismatch.on(
-        &name,
-        &["unpack"],
-        ScriptedResponse::ok("RAMDISK_FMT     [gzip]\n"),
+    let wrong = patched_cpio_init_boot("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    assert_eq!(
+        validate_patched_init_boot(PatchedCheck {
+            patched: &wrong,
+            stock_sha1: stock.sha1_hex(),
+            stock_sha256: stock.sha256_hex(),
+            plan_hash: "flp1-parser",
+        })
+        .unwrap_err(),
+        MagiskError::PatchedSha1
     );
-    mismatch.on(
-        &name,
-        &["cpio", "ramdisk.cpio", "test"],
-        ScriptedResponse::ok("Magisk detected\n"),
-    );
-    mismatch.on(
-        &name,
-        &["cpio", "ramdisk.cpio", "exists", "init"],
-        ScriptedResponse::ok(""),
-    );
-    mismatch.on(
-        &name,
-        &["cpio", "ramdisk.cpio", "extract"],
-        ScriptedResponse::ok("SHA1=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"),
-    );
-    assert!(validate_patched_init_boot(
-        &mismatch,
-        pc_check(&tool_path, &digest, &image, &work, &stock, &patched),
-    )
-    .await
-    .is_err());
-
-    let unknown = ScriptedRunner::new();
-    unknown.on(
-        &name,
-        &["unpack"],
-        ScriptedResponse::ok("RAMDISK_FMT     [xz]\n"),
-    );
-    let err = validate_patched_init_boot(
-        &unknown,
-        pc_check(&tool_path, &digest, &image, &work, &stock, &patched),
-    )
-    .await
+    let xz = patched_boot_with_ramdisk(b"\xfd7zXZ\x00");
+    let err = validate_patched_init_boot(PatchedCheck {
+        patched: &xz,
+        stock_sha1: stock.sha1_hex(),
+        stock_sha256: stock.sha256_hex(),
+        plan_hash: "flp1-parser",
+    })
     .unwrap_err();
     assert!(err.to_string().contains("unsupported ramdisk format"));
-    let wrong = "0".repeat(64);
-    assert!(validate_patched_init_boot(
-        &unknown,
-        pc_check(&tool_path, &wrong, &image, &work, &stock, &patched),
-    )
-    .await
-    .is_err());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -408,11 +351,6 @@ fn apk_components_come_from_the_archive() {
 
 #[test]
 fn magiskboot_and_busybox_are_not_bundled() {
-    let policy = MagiskbootPolicy::embedded().unwrap();
-    assert!(!policy.bundled);
-    assert!(!MagiskbootPolicy::text()
-        .to_ascii_lowercase()
-        .contains("sha256"));
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -422,64 +360,87 @@ fn magiskboot_and_busybox_are_not_bundled() {
     walk_names(&root);
 }
 
-#[tokio::test]
-async fn real_magiskboot_is_opt_in() {
-    let Ok(tool) = std::env::var("FLASHWRIGHT_MAGISKBOOT") else {
-        return;
-    };
-    let Ok(image) = std::env::var("FLASHWRIGHT_INIT_BOOT") else {
-        return;
-    };
-    let Ok(digest) = std::env::var("FLASHWRIGHT_MAGISKBOOT_SHA256") else {
-        return;
-    };
-    let Ok(stock_sha1) = std::env::var("FLASHWRIGHT_STOCK_SHA1") else {
-        return;
-    };
-    let Ok(stock_sha256) = std::env::var("FLASHWRIGHT_STOCK_SHA256") else {
-        return;
-    };
-    let Ok(patched_sha256) = std::env::var("FLASHWRIGHT_PATCHED_SHA256") else {
-        return;
-    };
-    let work = std::env::temp_dir().join("flashwright-m3-real-magiskboot");
-    let _ = std::fs::remove_dir_all(&work);
-    std::fs::create_dir_all(&work).unwrap();
-    let runner = flashwright_core::proc::SystemRunner;
-    validate_patched_init_boot(
-        &runner,
-        PatchedCheck {
-            tool_path: Path::new(&tool),
-            expected_sha256: &digest,
-            image: Path::new(&image),
-            work: &work,
-            stock_sha1: &stock_sha1,
-            stock_sha256: &stock_sha256,
-            patched_sha256: &patched_sha256,
-        },
-    )
-    .await
-    .expect("opt-in magiskboot check");
-    let _ = std::fs::remove_dir_all(&work);
+fn patched_cpio_init_boot(sha1: &str) -> Vec<u8> {
+    let config = format!("KEEPVERITY=true\nSHA1={sha1}\n");
+    let archive = cpio_newc(&[
+        (".backup/.magisk", config.as_bytes()),
+        ("init", b"magisk-init"),
+    ]);
+    patched_boot_with_ramdisk(&archive)
 }
 
-fn pc_check<'a>(
-    tool_path: &'a Path,
-    digest: &'a str,
-    image: &'a Path,
-    work: &'a Path,
-    stock: &'a SyntheticInitBoot,
-    patched: &'a str,
-) -> PatchedCheck<'a> {
-    PatchedCheck {
-        tool_path,
-        expected_sha256: digest,
-        image,
-        work,
-        stock_sha1: stock.sha1_hex(),
-        stock_sha256: stock.sha256_hex(),
-        patched_sha256: patched,
+fn patched_boot_with_ramdisk(ramdisk: &[u8]) -> Vec<u8> {
+    let mut header = vec![0u8; 1584];
+    header[..8].copy_from_slice(b"ANDROID!");
+    header[12..16].copy_from_slice(&(ramdisk.len() as u32).to_le_bytes());
+    header[20..24].copy_from_slice(&1584u32.to_le_bytes());
+    header[40..44].copy_from_slice(&4u32.to_le_bytes());
+    let mut image = header;
+    image.resize(4096, 0);
+    image.extend_from_slice(ramdisk);
+    let pad = (4096 - (ramdisk.len() % 4096)) % 4096;
+    image.resize(image.len() + pad, 0);
+    image
+}
+
+fn cpio_newc(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (index, (name, data)) in files.iter().enumerate() {
+        let mut name_bytes = name.as_bytes().to_vec();
+        name_bytes.push(0);
+        let mut header = String::from("070701");
+        for field in [
+            index as u32 + 1,
+            0o100755,
+            0,
+            0,
+            1,
+            0,
+            data.len() as u32,
+            0,
+            0,
+            0,
+            0,
+            name_bytes.len() as u32,
+            0,
+        ] {
+            header.push_str(&format!("{field:08x}"));
+        }
+        out.extend_from_slice(header.as_bytes());
+        out.extend_from_slice(&name_bytes);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        out.extend_from_slice(data);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
     }
+    let name_bytes = b"TRAILER!!!\0".to_vec();
+    let mut header = String::from("070701");
+    for field in [
+        0u32,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        name_bytes.len() as u32,
+        0,
+    ] {
+        header.push_str(&format!("{field:08x}"));
+    }
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(&name_bytes);
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+    out
 }
 
 fn request<'a>(

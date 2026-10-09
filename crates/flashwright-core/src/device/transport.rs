@@ -111,21 +111,6 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         });
     }
 
-    /// Drop queued writes except the last `keep` of them.
-    ///
-    /// A failed patch still has to run its cleanup writes. Those are the
-    /// last write steps in the plan.
-    pub(crate) fn keep_last_pending(&self, keep: usize) {
-        let mut guard = self.active.lock().expect("armed run");
-        let Some(active) = guard.as_mut() else {
-            return;
-        };
-        let len = active.pending.len();
-        if len > keep {
-            active.pending.drain(0..len - keep);
-        }
-    }
-
     pub async fn run_read(&self, cmd: crate::cmd::ReadCmd) -> Result<RunResult, DeviceError> {
         let rendered =
             crate::cmd::read_argv(&cmd).map_err(|err| DeviceError::Message(err.to_string()))?;
@@ -165,6 +150,17 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         let result = self.runner.run(invocation).await.map_err(DeviceError::from);
         drop(locks);
         result
+    }
+
+    /// Remove the fixed work directory. This does not take a write token.
+    pub(crate) async fn run_cleanup(
+        &self,
+        cmd: &crate::cmd::CleanupCmd,
+    ) -> Result<RunResult, DeviceError> {
+        let rendered =
+            crate::cmd::cleanup_argv(cmd).map_err(|err| DeviceError::Message(err.to_string()))?;
+        let budget = crate::timeouts::cleanup_budget();
+        self.run(&self.adb, rendered.args, budget.timeout).await
     }
 
     fn reverify_before_write(

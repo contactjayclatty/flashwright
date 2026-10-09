@@ -26,3 +26,23 @@ jobs:
         run: cargo test --workspace
       - name: Static checks
         run: cargo run -p xtask -- check
+
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: C++ toolchain for libFuzzer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++
+          sudo update-alternatives --set cc /usr/bin/gcc
+          sudo update-alternatives --set c++ /usr/bin/g++
+      - name: Fuzz the boot image parser
+        working-directory: crates/flashwright-bootimg
+        run: cargo fuzz run inspect -- -max_total_time=15 -rss_limit_mb=512

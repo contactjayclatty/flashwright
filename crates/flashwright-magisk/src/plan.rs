@@ -6,18 +6,16 @@
 //! Confirming it is what pushes files and runs the script. Building it does not.
 
 use flashwright_core::cmd::{
-    AdbHostRead, AdbHostWrite, AdbShellWrite, AssetRef, DeviceSerial, HostRef, ImageRef,
-    PullRemote, ReadCmd, ValidatedDevicePath, WorkFile, WriteCmd,
+    AdbHostRead, AdbHostWrite, AdbShellWrite, AssetRef, CleanupCmd, DeviceSerial, HostRef,
+    ImageRef, PullRemote, ReadCmd, ValidatedDevicePath, WorkFile, WriteCmd,
 };
-use flashwright_core::wizard::{PlanDraft, PlanStep};
+use flashwright_core::wizard::{ImageSeal, PlanDraft, PlanStep};
 use flashwright_plan::{PREPARE_PATCH_BUTTON, PREPARE_PATCH_TITLE};
 
 use crate::extract::ExtractedComponent;
 use crate::gates::{check_device_space, check_magisk_version, check_region, patch_partition};
 use crate::image::ExtractedBootImage;
 use crate::MagiskError;
-
-pub const FINALLY_STEPS: usize = 1;
 
 #[derive(Clone, Debug)]
 pub struct HostComponent {
@@ -44,7 +42,6 @@ pub struct AppPatchRequest<'a> {
 #[derive(Debug)]
 pub struct AppPatchPlan {
     pub draft: PlanDraft,
-    pub finally_steps: usize,
     pub title: &'static str,
     pub button: &'static str,
 }
@@ -108,17 +105,19 @@ pub fn plan_app_patch(request: &AppPatchRequest<'_>) -> Result<AppPatchPlan, Mag
         remote: PullRemote::Work(WorkFile::Patched),
         dst_name: "patched.img".into(),
     })));
-    steps.push(PlanStep::Write(WriteCmd::AdbShell(
-        AdbShellWrite::RemoveWorkDir { serial },
-    )));
+    steps.push(PlanStep::Cleanup(CleanupCmd::RemoveWorkDir { serial }));
     Ok(AppPatchPlan {
         draft: PlanDraft {
             serial: request.serial.to_string(),
             dry_run: false,
             expires_unix_ms: request.expires_unix_ms,
             steps,
+            images: vec![ImageSeal {
+                role: "stock-init-boot".into(),
+                sha1: request.stock.sha1_hex().to_string(),
+                sha256: request.stock.sha256_hex().to_string(),
+            }],
         },
-        finally_steps: FINALLY_STEPS,
         title: PREPARE_PATCH_TITLE,
         button: PREPARE_PATCH_BUTTON,
     })

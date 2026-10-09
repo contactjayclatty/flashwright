@@ -54,7 +54,7 @@ pub fn check_patched_sha1(
     Ok(())
 }
 
-/// Known-bad codes come from the caller. The embedded table stays empty.
+/// Known-bad codes come from the caller. The embedded table is the safety list.
 pub fn check_magisk_version(
     version_code: u32,
     security_patch: &str,

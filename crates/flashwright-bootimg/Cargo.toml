@@ -1,0 +1,18 @@
+[package]
+name = "flashwright-bootimg"
+description = "Read-only parser for a patched init_boot image. It never executes anything."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_jcs.workspace = true
+sha2.workspace = true
+flate2.workspace = true
+lz4_flex.workspace = true

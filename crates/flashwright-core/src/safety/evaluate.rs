@@ -160,10 +160,13 @@ pub fn dry_run_lines(steps: &[PlanStep], decisions: &[GateDecision]) -> Vec<Stri
     }
     if lines.is_empty() {
         for step in steps {
-            if let PlanStep::Write(cmd) = step {
-                if let Ok(rendered) = write_argv(cmd) {
-                    lines.push(format!("WOULD RUN: {}", rendered.args.join(" ")));
-                }
+            let rendered = match step {
+                PlanStep::Write(cmd) => write_argv(cmd).ok(),
+                PlanStep::Cleanup(cmd) => crate::cmd::cleanup_argv(cmd).ok(),
+                PlanStep::Read(_) => None,
+            };
+            if let Some(rendered) = rendered {
+                lines.push(format!("WOULD RUN: {}", rendered.args.join(" ")));
             }
         }
     }
@@ -173,7 +176,7 @@ pub fn dry_run_lines(steps: &[PlanStep], decisions: &[GateDecision]) -> Vec<Stri
 pub fn needs_backup(steps: &[PlanStep]) -> bool {
     steps.iter().any(|step| match step {
         PlanStep::Write(cmd) => is_image_write(cmd),
-        PlanStep::Read(_) => false,
+        PlanStep::Read(_) | PlanStep::Cleanup(_) => false,
     })
 }
 
@@ -726,6 +729,7 @@ fn rendered_args(steps: &[PlanStep]) -> Vec<String> {
         let rendered = match step {
             PlanStep::Read(cmd) => crate::cmd::read_argv(cmd).ok(),
             PlanStep::Write(cmd) => write_argv(cmd).ok(),
+            PlanStep::Cleanup(cmd) => crate::cmd::cleanup_argv(cmd).ok(),
         };
         if let Some(rendered) = rendered {
             out.extend(rendered.args);

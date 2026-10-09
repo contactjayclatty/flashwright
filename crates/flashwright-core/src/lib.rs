@@ -10,7 +10,6 @@
 pub mod cmd;
 pub mod device;
 pub mod exe;
-pub mod magiskboot;
 pub mod parse;
 pub mod proc;
 pub mod safety;

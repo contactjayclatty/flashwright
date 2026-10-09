@@ -66,7 +66,7 @@ Safety checks run before a patch or a flash. They cover the phone, the factory i
 ## Features
 
 - **Patch on your phone.** The Magisk app you already installed patches init_boot. You confirm "Patch on your phone?" before anything is copied to the phone.
-- **PC check.** Flashwright unpacks the patched init_boot with magiskboot and checks that Magisk's init and the stock SHA-1 are present. magiskboot is a tool you supply. It is not included with Flashwright.
+- **PC check.** Flashwright reads the patched init_boot and checks that Magisk's init and the stock SHA-1 are present.
 - **Pixel 9 Pro XL.** That phone (komodo) patches init_boot.
 
 ## Status

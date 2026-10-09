@@ -1,3 +1,0 @@
-# PC-side magiskboot. The user supplies the file and its SHA-256.
-# Flashwright does not bundle this tool and does not pin a hash here.
-bundled = false
