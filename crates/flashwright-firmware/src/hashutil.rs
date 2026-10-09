@@ -5,8 +5,12 @@
 //! `runtime.py` (commit 081286d). The read size is 1 MiB, and a progress
 //! mark is due every 64 MiB.
 
+#[cfg(test)]
 use std::fs::File;
 use std::io::Read;
+#[cfg(test)]
+use std::io::{Seek, SeekFrom};
+#[cfg(test)]
 use std::path::Path;
 
 use sha1::Sha1;
@@ -62,21 +66,34 @@ pub fn progress_due(bytes: u64, last_mark: &mut u64, interval: u64, done: bool) 
     }
 }
 
-pub fn sha256_file(
-    path: &Path,
-    mut progress: Option<&mut dyn FnMut(u64)>,
+pub struct Digests {
+    pub sha256: String,
+    pub sha1: String,
+}
+
+pub fn sha256_reader<R: Read>(
+    reader: &mut R,
+    progress: Option<&mut dyn FnMut(u64)>,
 ) -> Result<String, FirmwareError> {
-    let mut file = File::open(path).map_err(FirmwareError::io)?;
-    let mut hasher = Sha256::new();
+    Ok(hash_reader(reader, progress)?.sha256)
+}
+
+pub fn hash_reader<R: Read>(
+    reader: &mut R,
+    mut progress: Option<&mut dyn FnMut(u64)>,
+) -> Result<Digests, FirmwareError> {
+    let mut sha256 = Sha256::new();
+    let mut sha1 = Sha1::new();
     let mut buf = vec![0u8; HASH_CHUNK];
     let mut total = 0u64;
     let mut last_mark = 0u64;
     loop {
-        let read = file.read(&mut buf).map_err(FirmwareError::io)?;
+        let read = reader.read(&mut buf).map_err(FirmwareError::io)?;
         if read == 0 {
             break;
         }
-        hasher.update(&buf[..read]);
+        sha256.update(&buf[..read]);
+        sha1.update(&buf[..read]);
         total += read as u64;
         if progress_due(total, &mut last_mark, HASH_PROGRESS_EVERY, false) {
             if let Some(callback) = progress.as_mut() {
@@ -87,21 +104,21 @@ pub fn sha256_file(
     if let Some(callback) = progress.as_mut() {
         callback(total);
     }
-    Ok(hex_encode(&hasher.finalize()))
+    Ok(Digests {
+        sha256: hex_encode(&sha256.finalize()),
+        sha1: hex_encode(&sha1.finalize()),
+    })
 }
 
-pub fn sha1_file(path: &Path) -> Result<String, FirmwareError> {
+#[cfg(test)]
+pub fn sha256_file(
+    path: &Path,
+    progress: Option<&mut dyn FnMut(u64)>,
+) -> Result<String, FirmwareError> {
     let mut file = File::open(path).map_err(FirmwareError::io)?;
-    let mut hasher = Sha1::new();
-    let mut buf = vec![0u8; HASH_CHUNK];
-    loop {
-        let read = file.read(&mut buf).map_err(FirmwareError::io)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buf[..read]);
-    }
-    Ok(hex_encode(&hasher.finalize()))
+    let digest = sha256_reader(&mut file, progress)?;
+    file.seek(SeekFrom::Start(0)).map_err(FirmwareError::io)?;
+    Ok(digest)
 }
 
 #[cfg(test)]

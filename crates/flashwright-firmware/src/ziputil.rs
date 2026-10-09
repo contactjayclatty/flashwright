@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Clatty Works
 
-//! Zip helpers. A stored entry is read as a sub-range of the outer file.
-//! A deflated entry is streamed to the work directory in 64 KiB buffers.
+//! Zip helpers. A stored entry is read as a sub-range of the already-open file.
+//! A deflated entry is streamed to the work directory. Output files are created
+//! without following a symlink.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -14,9 +15,8 @@ use crate::error::FirmwareError;
 
 pub const COPY_CHUNK: usize = 64 * 1024;
 
-pub fn open_zip(path: &Path) -> Result<ZipArchive<File>, FirmwareError> {
-    let file = File::open(path).map_err(FirmwareError::io)?;
-    ZipArchive::new(file).map_err(map_zip)
+pub fn copy_chunk_len() -> usize {
+    COPY_CHUNK.saturating_mul(crate::open::extraction_workers())
 }
 
 pub fn entry_name<R: Read>(entry: &zip::read::ZipFile<'_, R>) -> Result<String, FirmwareError> {
@@ -38,32 +38,6 @@ pub fn map_zip(err: zip::result::ZipError) -> FirmwareError {
     }
 }
 
-pub fn stream_entry<R: Read>(
-    entry: &mut zip::read::ZipFile<'_, R>,
-    dest: &Path,
-) -> Result<(), FirmwareError> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(FirmwareError::io)?;
-    }
-    let result = (|| {
-        let mut output = File::create(dest).map_err(FirmwareError::io)?;
-        let mut buf = vec![0u8; COPY_CHUNK];
-        loop {
-            let read = entry.read(&mut buf).map_err(map_read)?;
-            if read == 0 {
-                break;
-            }
-            output.write_all(&buf[..read]).map_err(FirmwareError::io)?;
-        }
-        output.flush().map_err(FirmwareError::io)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(dest);
-    }
-    result
-}
-
 pub fn map_read(err: io::Error) -> FirmwareError {
     let text = err.to_string().to_ascii_lowercase();
     if text.contains("crc") || text.contains("checksum") {
@@ -71,6 +45,78 @@ pub fn map_read(err: io::Error) -> FirmwareError {
     } else {
         FirmwareError::io(err)
     }
+}
+
+/// Create `path` for writing. An existing name, including a symlink, is refused.
+pub fn create_output(path: &Path) -> Result<File, FirmwareError> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(FirmwareError::io)?;
+        }
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).read(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT
+        options.custom_flags(0x0020_0000);
+    }
+    options.open(path).map_err(FirmwareError::io)
+}
+
+/// Copy until `reader` ends. A chunk that would pass `cap` is refused before it is written.
+pub fn copy_capped<R: Read>(
+    reader: &mut R,
+    output: &mut File,
+    cap: u64,
+    too_big: &'static str,
+) -> Result<u64, FirmwareError> {
+    let mut buf = vec![0u8; copy_chunk_len()];
+    let mut written = 0u64;
+    loop {
+        let read = reader.read(&mut buf).map_err(map_read)?;
+        if read == 0 {
+            break;
+        }
+        let next = written.saturating_add(read as u64);
+        if next > cap {
+            return Err(FirmwareError::Archive(too_big.into()));
+        }
+        output.write_all(&buf[..read]).map_err(FirmwareError::io)?;
+        written = next;
+    }
+    output.flush().map_err(FirmwareError::io)?;
+    Ok(written)
+}
+
+pub fn read_limited<R: Read>(
+    reader: &mut R,
+    declared: u64,
+    cap: u64,
+    too_big: &'static str,
+) -> Result<Vec<u8>, FirmwareError> {
+    if declared > cap {
+        return Err(FirmwareError::Archive(too_big.into()));
+    }
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let read = reader.read(&mut buf).map_err(map_read)?;
+        if read == 0 {
+            break;
+        }
+        if (out.len() as u64).saturating_add(read as u64) > cap {
+            return Err(FirmwareError::Archive(too_big.into()));
+        }
+        out.extend_from_slice(&buf[..read]);
+    }
+    Ok(out)
 }
 
 /// Byte range of a stored local file, after the local header.
@@ -162,8 +208,9 @@ pub struct ListedEntry {
     pub is_dir: bool,
 }
 
-pub fn list_entries(path: &Path) -> Result<Vec<ListedEntry>, FirmwareError> {
-    let mut archive = open_zip(path)?;
+pub fn list_archive<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Result<Vec<ListedEntry>, FirmwareError> {
     let mut out = Vec::new();
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(map_zip)?;
@@ -179,4 +226,73 @@ pub fn list_entries(path: &Path) -> Result<Vec<ListedEntry>, FirmwareError> {
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    struct Chunks {
+        data: Vec<u8>,
+        pos: usize,
+        chunk: usize,
+    }
+
+    impl Read for Chunks {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pos >= self.data.len() {
+                return Ok(0);
+            }
+            let count = (self.data.len() - self.pos).min(self.chunk).min(buf.len());
+            buf[..count].copy_from_slice(&self.data[self.pos..self.pos + count]);
+            self.pos += count;
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn copy_stops_before_the_overflowing_chunk() {
+        let dir = std::env::temp_dir().join(format!("fw-cap-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("out.bin");
+        let _ = std::fs::remove_file(&path);
+        let mut output = create_output(&path).unwrap();
+        let mut reader = Chunks {
+            data: vec![7u8; 200],
+            pos: 0,
+            chunk: 40,
+        };
+        let err = copy_capped(&mut reader, &mut output, 100, "too big").unwrap_err();
+        assert!(matches!(err, FirmwareError::Archive(_)));
+        output.flush().unwrap();
+        let len = output.metadata().unwrap().len();
+        assert!(len <= 100);
+        assert_eq!(len, 80);
+        drop(output);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn declared_metadata_over_the_cap_is_refused_before_the_body() {
+        let mut reader = Cursor::new(vec![1u8; 32]);
+        let err = read_limited(&mut reader, 2_000_000, 1024, "too big").unwrap_err();
+        assert!(matches!(err, FirmwareError::Archive(_)));
+        assert_eq!(reader.position(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_destination_is_refused() {
+        let dir = std::env::temp_dir().join(format!("fw-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("safe.txt");
+        std::fs::write(&target, b"keep").unwrap();
+        let link = dir.join("init_boot.img");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(create_output(&link).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

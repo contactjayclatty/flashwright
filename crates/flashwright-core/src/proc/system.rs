@@ -18,6 +18,7 @@ use crate::proc::{CommandRunner, ProcError, ProcessGroup, RunLimits, RunResult, 
 /// The executable must be a measured or allow-listed adb or fastboot. The
 /// argument vector is a catalogue command.
 #[derive(Debug, Default, Clone, Copy)]
+#[allow(dead_code)] // constructed by tests; the window uses a stand-in transport
 pub struct SystemRunner;
 
 impl CommandRunner for SystemRunner {
@@ -206,10 +207,8 @@ impl CommandRunner for SystemRunner {
     }
 }
 
-fn child_command(
-    exe: &VerifiedExe,
-    args: &[String],
-) -> Result<tokio::process::Command, ProcError> {
+#[allow(dead_code)] // called by the host runner; stable Rust marks that path unused
+fn child_command(exe: &VerifiedExe, args: &[String]) -> Result<tokio::process::Command, ProcError> {
     #[cfg(all(test, unix))]
     if let Some(log) = spawn::exec_trace() {
         let strace = if Path::new("/usr/bin/strace").is_file() {
@@ -233,6 +232,7 @@ fn child_command(
     Ok(command)
 }
 
+#[allow(dead_code)] // called by the host runner; stable Rust marks that path unused
 fn quiet_window(limits: &RunLimits, saw_percent: bool) -> Option<Duration> {
     if saw_percent {
         limits.finalising.or(limits.watchdog)
@@ -241,6 +241,7 @@ fn quiet_window(limits: &RunLimits, saw_percent: bool) -> Option<Duration> {
     }
 }
 
+#[allow(dead_code)] // called by the host runner; stable Rust marks that path unused
 fn chunk_has_percent(chunk: &[u8]) -> bool {
     let text = String::from_utf8_lossy(chunk);
     let Some(start) = text.find("(~") else {
@@ -249,6 +250,7 @@ fn chunk_has_percent(chunk: &[u8]) -> bool {
     text[start..].contains("%)")
 }
 
+#[allow(dead_code)] // called by the host runner; stable Rust marks that path unused
 fn path_with_tools(tools_dir: &Path) -> OsString {
     let system = if cfg!(windows) {
         let root = std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
@@ -262,6 +264,7 @@ fn path_with_tools(tools_dir: &Path) -> OsString {
     path
 }
 
+#[allow(dead_code)] // called by the host runner; stable Rust marks that path unused
 async fn read_chunk<R: AsyncRead + Unpin>(pipe: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
     pipe.read(buf).await
 }
@@ -393,6 +396,7 @@ mod runner_tests {
     }
 }
 
+#[allow(dead_code)] // called by the host runner; stable Rust marks that path unused
 async fn kill_child(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     crate::proc::unix_kill::kill_group(child.id());

@@ -4,6 +4,7 @@
 //! Kill the child's process group. `pre_exec` made the child the leader.
 
 /// Send SIGKILL to the process group whose id is `pid`.
+#[allow(dead_code)] // called by the host runner; stable Rust marks that path unused
 pub(crate) fn kill_group(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;

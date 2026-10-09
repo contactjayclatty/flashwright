@@ -14,6 +14,7 @@ mod argv;
 mod catalog;
 mod derive;
 mod error;
+mod facts;
 mod info;
 mod parse;
 mod transport;
@@ -26,6 +27,7 @@ pub use derive::{
     parse_slot,
 };
 pub use error::DeviceError;
+pub use facts::facts_from_device;
 pub use parse::{
     merge_scans, parse_adb_devices, parse_battery, parse_dumpsys_package, parse_fastboot_devices,
     parse_getprop, parse_getvar, parse_mode_token, PropMap,

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Clatty Works
 
+use std::fs::File;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -10,14 +11,14 @@ use prost::Message;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-use crate::bootimg::synthetic_boot;
+use crate::bootimg::{synthetic_boot, synthetic_boot_custom};
 use crate::hashutil::{sha256_bytes, sha256_file};
 use crate::open::{open_package, OpenRequest};
 use crate::proto::chromeos_update_engine::{
     DeltaArchiveManifest, Extent, InstallOperation, PartitionInfo, PartitionUpdate,
 };
 use crate::ziputil::windows_flash_name;
-use crate::{FirmwareError, PackageKind, StockPartition};
+use crate::{DeviceFacts, FirmwareError, PackageKind, StockPartition};
 
 const PATCH: &str = "2026-10-01";
 const FINGERPRINT: &str = "google/komodo/komodo:17/TEST/1:user/release-keys";
@@ -162,6 +163,14 @@ fn assert_no_images(dir: &Path) {
     }
 }
 
+fn facts(codename: &str, timestamp: Option<u64>, patch: Option<&str>) -> DeviceFacts {
+    DeviceFacts {
+        codename: codename.to_string(),
+        build_date_utc: timestamp,
+        security_patch: patch.map(str::to_string),
+    }
+}
+
 async fn run(
     path: &Path,
     out: &Path,
@@ -170,13 +179,22 @@ async fn run(
     timestamp: Option<u64>,
     patch: Option<&str>,
 ) -> Result<crate::OpenedPackage, FirmwareError> {
+    let published = match published {
+        Some(value) => value,
+        None => sha256_file(path, None).unwrap(),
+    };
+    let package = File::open(path).unwrap();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap()
+        .to_string();
     open_package(OpenRequest {
-        path: path.to_path_buf(),
+        package,
+        file_name,
         output_dir: out.to_path_buf(),
         published_sha256: published,
-        expected_codename: codename.map(str::to_string),
-        device_build_timestamp: timestamp,
-        device_security_patch: patch.map(str::to_string),
+        device: facts(codename.unwrap_or("komodo"), timestamp, patch),
         on_hash_progress: None,
     })
     .await
@@ -275,10 +293,13 @@ async fn alias_eos_matches_aurora() {
         "aurora-ota",
         &ota_zip(&meta("eos", PATCH, fingerprint, ""), &payload, false),
     );
-    let opened = run(&path, &root.join("out"), None, Some("aurora"), None, None)
+    let err = run(&path, &root.join("out"), None, Some("aurora"), None, None)
         .await
-        .unwrap();
-    assert_eq!(opened.codename, "aurora");
+        .unwrap_err();
+    assert!(
+        matches!(err, FirmwareError::UnknownDevice),
+        "eos still matches aurora, then the missing device-table row is refused"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -358,7 +379,7 @@ async fn downgrade_is_refused() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, FirmwareError::Downgrade));
+    assert!(matches!(err, FirmwareError::OlderBuild));
     let err = run(
         &path,
         &root.join("out2"),
@@ -588,13 +609,18 @@ async fn hash_progress_is_reported() {
     );
     let marks = Arc::new(AtomicU32::new(0));
     let marks_task = Arc::clone(&marks);
+    let published = sha256_file(&path, None).unwrap();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap()
+        .to_string();
     open_package(OpenRequest {
-        path,
+        package: File::open(&path).unwrap(),
+        file_name,
         output_dir: root.join("out"),
-        published_sha256: None,
-        expected_codename: Some("komodo".to_string()),
-        device_build_timestamp: None,
-        device_security_patch: None,
+        published_sha256: published,
+        device: facts("komodo", None, None),
         on_hash_progress: Some(Box::new(move |_| {
             marks_task.fetch_add(1, Ordering::Relaxed);
         })),
@@ -603,6 +629,10 @@ async fn hash_progress_is_reported() {
     .unwrap();
     assert!(marks.load(Ordering::Relaxed) >= 1);
     assert!(crate::extraction_workers() <= 4);
+    assert_eq!(
+        crate::ziputil::copy_chunk_len(),
+        crate::ziputil::COPY_CHUNK * crate::extraction_workers()
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -611,4 +641,264 @@ fn komodo_is_an_init_boot_device() {
     let devices = crate::catalog::DeviceTable::embedded().unwrap();
     assert_eq!(devices.has_init_boot("komodo"), Some(true));
     assert_eq!(devices.has_init_boot("oriole"), Some(false));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn header_patch_and_build_date_are_read() {
+    let image = boot("init_boot", PATCH, FINGERPRINT);
+    let payload = payload_bytes(&[("init_boot", &image)]);
+    let root = scratch();
+    let (path, hash) = seal(
+        &root,
+        "komodo-ota",
+        &ota_zip(&meta("komodo", PATCH, FINGERPRINT, ""), &payload, false),
+    );
+    let opened = run(
+        &path,
+        &root.join("out"),
+        Some(hash),
+        Some("komodo"),
+        Some(TIMESTAMP),
+        Some("2026-10-01"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(opened.image_security_patch.as_deref(), Some("2026-10"));
+    assert_eq!(opened.image_build_date_utc, Some(TIMESTAMP));
+    assert!(opened.acks.is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_missing_patch_or_build_date_is_acknowledged() {
+    let image = align_boot(synthetic_boot_custom(
+        "init_boot",
+        PATCH,
+        FINGERPRINT,
+        None,
+        None,
+    ));
+    let payload = payload_bytes(&[("init_boot", &image)]);
+    let root = scratch();
+    let (path, _) = seal(
+        &root,
+        "komodo-ota",
+        &ota_zip(&meta("komodo", PATCH, FINGERPRINT, ""), &payload, false),
+    );
+    let opened = run(
+        &path,
+        &root.join("out"),
+        None,
+        Some("komodo"),
+        Some(TIMESTAMP + 1),
+        Some("2026-11-01"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(opened.image_security_patch, None);
+    assert_eq!(opened.image_build_date_utc, None);
+    assert_eq!(opened.acks.len(), 2);
+    assert_eq!(opened.acks[0].gate, "G07");
+    assert_eq!(
+        opened.acks[0].message,
+        "The security patch level could not be read from the boot image."
+    );
+    assert_eq!(opened.acks[1].gate, "G08");
+    assert_eq!(
+        opened.acks[1].message,
+        "The build date could not be read from the image."
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_missing_image_fact_is_its_own_acknowledgement() {
+    let root = scratch();
+    let missing_patch = align_boot(synthetic_boot_custom(
+        "init_boot",
+        PATCH,
+        FINGERPRINT,
+        None,
+        Some(TIMESTAMP),
+    ));
+    let payload = payload_bytes(&[("init_boot", &missing_patch)]);
+    let (path, _) = seal(
+        &root,
+        "komodo-ota",
+        &ota_zip(&meta("komodo", PATCH, FINGERPRINT, ""), &payload, false),
+    );
+    let opened = run(&path, &root.join("patch"), None, Some("komodo"), None, None)
+        .await
+        .unwrap();
+    assert_eq!(opened.acks.len(), 1);
+    assert_eq!(opened.acks[0].gate, "G07");
+    assert_eq!(opened.image_build_date_utc, Some(TIMESTAMP));
+
+    let missing_date = align_boot(synthetic_boot_custom(
+        "init_boot",
+        PATCH,
+        FINGERPRINT,
+        Some((2026, 10)),
+        None,
+    ));
+    let payload = payload_bytes(&[("init_boot", &missing_date)]);
+    let (path, _) = seal(
+        &root,
+        "komodo-date",
+        &ota_zip(&meta("komodo", PATCH, FINGERPRINT, ""), &payload, false),
+    );
+    let opened = run(&path, &root.join("date"), None, Some("komodo"), None, None)
+        .await
+        .unwrap();
+    assert_eq!(opened.acks.len(), 1);
+    assert_eq!(opened.acks[0].gate, "G08");
+    assert_eq!(opened.image_security_patch.as_deref(), Some("2026-10"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn package_metadata_cannot_override_the_header_patch() {
+    let image = align_boot(synthetic_boot_custom(
+        "init_boot",
+        "2026-12-01",
+        FINGERPRINT,
+        Some((2026, 10)),
+        Some(TIMESTAMP),
+    ));
+    let payload = payload_bytes(&[("init_boot", &image)]);
+    let text = meta("komodo", "2026-12-01", FINGERPRINT, "");
+    let root = scratch();
+    let (path, _) = seal(&root, "komodo-ota", &ota_zip(&text, &payload, false));
+    let err = run(
+        &path,
+        &root.join("out"),
+        None,
+        Some("komodo"),
+        None,
+        Some("2026-11-01"),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, FirmwareError::Downgrade));
+    let opened = run(
+        &path,
+        &root.join("same"),
+        None,
+        Some("komodo"),
+        Some(TIMESTAMP),
+        Some("2026-10"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(opened.image_security_patch.as_deref(), Some("2026-10"));
+    assert_eq!(opened.image_build_date_utc, Some(TIMESTAMP));
+    assert!(opened.acks.is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_open_handle_still_works_after_the_path_is_removed() {
+    let image = boot("init_boot", PATCH, FINGERPRINT);
+    let payload = payload_bytes(&[("init_boot", &image)]);
+    let root = scratch();
+    let (path, hash) = seal(
+        &root,
+        "komodo-ota",
+        &ota_zip(&meta("komodo", PATCH, FINGERPRINT, ""), &payload, false),
+    );
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap()
+        .to_string();
+    let package = File::open(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let opened = open_package(OpenRequest {
+        package,
+        file_name,
+        output_dir: root.join("out"),
+        published_sha256: hash,
+        device: facts("komodo", None, None),
+        on_hash_progress: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(opened.partition, StockPartition::InitBoot);
+    assert!(root.join("out").join("init_boot.img").is_file());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_blank_published_hash_is_refused() {
+    let image = boot("init_boot", PATCH, FINGERPRINT);
+    let payload = payload_bytes(&[("init_boot", &image)]);
+    let root = scratch();
+    let (path, _) = seal(
+        &root,
+        "komodo-ota",
+        &ota_zip(&meta("komodo", PATCH, FINGERPRINT, ""), &payload, false),
+    );
+    let err = run(
+        &path,
+        &root.join("out"),
+        Some("   ".to_string()),
+        Some("komodo"),
+        None,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, FirmwareError::PublishedHash));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_codename_is_blocked() {
+    let image = boot("boot", PATCH, FINGERPRINT);
+    let payload = payload_bytes(&[("boot", &image)]);
+    let root = scratch();
+    let (path, _) = seal(
+        &root,
+        "notaphone-ota",
+        &ota_zip(&meta("notaphone", PATCH, FINGERPRINT, ""), &payload, false),
+    );
+    let err = run(
+        &path,
+        &root.join("out"),
+        None,
+        Some("notaphone"),
+        None,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, FirmwareError::UnknownDevice));
+    assert_no_images(&root.join("out"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deflated_factory_with_the_wrong_codename_leaves_no_inner_zip() {
+    let mut outer_cursor = Cursor::new(Vec::new());
+    let mut outer = ZipWriter::new(&mut outer_cursor);
+    outer.start_file("flash-all.sh", stored()).unwrap();
+    outer.write_all(b"#!/bin/sh\n").unwrap();
+    outer.start_file(windows_flash_name(), stored()).unwrap();
+    outer.write_all(b"echo\n").unwrap();
+    outer
+        .start_file("image-device-test.zip", deflated())
+        .unwrap();
+    outer.write_all(b"this is not an image zip").unwrap();
+    outer.finish().unwrap();
+    let root = scratch();
+    let (path, _) = seal(&root, "shiba-deflated-factory", &outer_cursor.into_inner());
+    let out = root.join("out");
+    let err = run(&path, &out, None, Some("komodo"), None, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FirmwareError::CodenameMismatch));
+    assert!(!out.join("image.zip").exists());
+    assert_no_images(&out);
+    let _ = std::fs::remove_dir_all(&root);
 }

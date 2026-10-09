@@ -24,6 +24,7 @@ pub mod mock;
 
 mod invoke;
 
+pub use crate::device::facts_from_device;
 pub use serde;
 pub(crate) use token::ConfirmedPlan;
 pub use token::WriteToken;
