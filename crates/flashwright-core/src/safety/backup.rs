@@ -7,15 +7,17 @@
 //! the phone hash. A truncated read is not a complete backup. Bytes are written
 //! under a partial directory and renamed into place with a manifest.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::Sha256;
 
-use crate::cmd::{ByNameRoot, DeviceSerial, ExecOutSuRead, ReadCmd, SuRead};
+use crate::cmd::{ByNameRoot, DeviceSerial, ExecOutSuRead, ReadCmd, SuRead, MAX_BLOCK_LEN};
 use crate::device::{Partition, PlatformToolsTransport, Slot};
 use crate::proc::CommandRunner;
+use crate::timeouts;
 
 use super::evaluate::GateBlock;
 
@@ -89,13 +91,18 @@ struct ManifestFile {
 struct Captured {
     partition: Partition,
     slot: Slot,
-    bytes: Vec<u8>,
+    file: String,
+    size: u64,
     sha256: String,
     sha1: String,
     device_sha256: String,
 }
 
-/// Read both slots of `partition` and of vbmeta. Compare each read with the phone's own SHA-256.
+/// Read both slots of `partition` and of vbmeta.
+///
+/// Each image is streamed to disk, read a second time, and checked against
+/// `sha256sum` on the phone. The three digests must agree. A factory image is
+/// not the reference, so a rooted phone passes.
 pub async fn capture_stock<R: CommandRunner>(
     transport: &PlatformToolsTransport<R>,
     serial: &DeviceSerial,
@@ -109,28 +116,93 @@ pub async fn capture_stock<R: CommandRunner>(
             "vbmeta is read with the boot image, not alone.",
         ));
     }
+    let serial_sha256 = sha256_hex(serial.as_str().as_bytes());
+    let set_id = sha256_hex(
+        format!(
+            "{serial_sha256}:{}:{}:4",
+            slot.as_str(),
+            partition.fastboot_name()
+        )
+        .as_bytes(),
+    );
+    let partial = dest.join(format!("{set_id}.partial"));
+    if partial.exists() {
+        fs::remove_dir_all(&partial).map_err(|err| block("G14", err.to_string()))?;
+    }
+    fs::create_dir_all(&partial).map_err(|err| block("G14", err.to_string()))?;
     let mut captured = Vec::new();
     for part in [partition, Partition::Vbmeta] {
         for part_slot in [Slot::A, Slot::B] {
-            captured.push(capture_one(transport, serial, part, part_slot).await?);
+            match stream_one(transport, serial, part, part_slot, &partial).await {
+                Ok(item) => captured.push(item),
+                Err(err) => {
+                    let _ = fs::remove_dir_all(&partial);
+                    return Err(err);
+                }
+            }
         }
     }
-    write_set(serial, slot, partition, dest, captured)
+    finish_set(
+        serial_sha256,
+        set_id,
+        slot,
+        partition,
+        dest,
+        partial,
+        captured,
+    )
 }
 
-async fn capture_one<R: CommandRunner>(
+async fn stream_one<R: CommandRunner>(
     transport: &PlatformToolsTransport<R>,
     serial: &DeviceSerial,
     partition: Partition,
     slot: Slot,
+    dir: &Path,
 ) -> Result<Captured, GateBlock> {
     let device_sha = device_sha256(transport, serial, partition, slot).await?;
+    let file = format!("{}_{}.img", partition.fastboot_name(), slot.as_str());
+    let path = dir.join(&file);
+    let first = pull_block(transport, serial, partition, slot).await?;
+    let (sha256, sha1) = write_chunks(&path, &first)?;
+    let second = pull_block(transport, serial, partition, slot).await?;
+    let second_sha = hash_chunks(&second).0;
+    if sha256 != second_sha || sha256 != device_sha {
+        return Err(block(
+            "G14",
+            format!("The {partition} reads do not match the phone's SHA-256."),
+        ));
+    }
+    Ok(Captured {
+        partition,
+        slot,
+        file,
+        size: first.len() as u64,
+        sha256,
+        sha1,
+        device_sha256: device_sha,
+    })
+}
+
+async fn pull_block<R: CommandRunner>(
+    transport: &PlatformToolsTransport<R>,
+    serial: &DeviceSerial,
+    partition: Partition,
+    slot: Slot,
+) -> Result<Vec<u8>, GateBlock> {
     let cmd = ReadCmd::ExecOutSu(ExecOutSuRead::CatBlock {
         serial: serial.clone(),
         root: ByNameRoot::ByName,
         partition,
         slot,
     });
+    let budget = timeouts::read_budget(&cmd);
+    if budget.timeout.as_secs() < 60 || budget.watchdog.is_none() {
+        return Err(block(
+            "G14",
+            "The block read timeout is shorter than the catalogue.",
+        ));
+    }
     let result = transport
         .run_read(cmd)
         .await
@@ -147,21 +219,13 @@ async fn capture_one<R: CommandRunner>(
     if result.stdout.is_empty() {
         return Err(block("G14", format!("The {partition} read was empty.")));
     }
-    let sha256 = sha256_hex(&result.stdout);
-    if sha256 != device_sha {
+    if over_catalogue_cap(result.stdout.len() as u64) {
         return Err(block(
             "G14",
-            format!("The {partition} read does not match the phone's SHA-256."),
+            format!("The {partition} read is larger than the catalogue allows."),
         ));
     }
-    Ok(Captured {
-        partition,
-        slot,
-        sha1: sha1_hex(&result.stdout),
-        sha256,
-        device_sha256: device_sha,
-        bytes: result.stdout,
-    })
+    Ok(result.stdout)
 }
 
 async fn device_sha256<R: CommandRunner>(
@@ -194,43 +258,24 @@ async fn device_sha256<R: CommandRunner>(
     })
 }
 
-fn write_set(
-    serial: &DeviceSerial,
+fn finish_set(
+    serial_sha256: String,
+    set_id: String,
     slot: Slot,
     partition: Partition,
     dest: &Path,
+    partial: PathBuf,
     captured: Vec<Captured>,
 ) -> Result<BackupSet, GateBlock> {
-    let serial_sha256 = sha256_hex(serial.as_str().as_bytes());
-    let set_id = sha256_hex(
-        format!(
-            "{serial_sha256}:{}:{}:{}",
-            slot.as_str(),
-            partition.fastboot_name(),
-            captured.len()
-        )
-        .as_bytes(),
-    );
-    let partial = dest.join(format!("{set_id}.partial"));
-    if partial.exists() {
-        fs::remove_dir_all(&partial).map_err(|err| block("G14", err.to_string()))?;
-    }
-    fs::create_dir_all(&partial).map_err(|err| block("G14", err.to_string()))?;
     let mut items = Vec::new();
     let mut sums = String::new();
     for item in &captured {
-        let file = format!(
-            "{}_{}.img",
-            item.partition.fastboot_name(),
-            item.slot.as_str()
-        );
-        fs::write(partial.join(&file), &item.bytes).map_err(|err| block("G14", err.to_string()))?;
-        sums.push_str(&format!("{}  {file}\n", item.sha256));
+        sums.push_str(&format!("{}  {}\n", item.sha256, item.file));
         items.push(ManifestItem {
             partition: item.partition.fastboot_name().to_string(),
             slot: item.slot.as_str().to_string(),
-            file,
-            size: item.bytes.len() as u64,
+            file: item.file.clone(),
+            size: item.size,
             sha256: item.sha256.clone(),
             sha1: item.sha1.clone(),
             device_sha256: item.device_sha256.clone(),
@@ -261,12 +306,37 @@ fn write_set(
     })
 }
 
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    hex(Sha256::digest(bytes))
+fn write_chunks(path: &Path, bytes: &[u8]) -> Result<(String, String), GateBlock> {
+    let mut file = File::create(path).map_err(|err| block("G14", err.to_string()))?;
+    let mut sha256 = Sha256::new();
+    let mut sha1 = Sha1::new();
+    for chunk in bytes.chunks(64 * 1024) {
+        file.write_all(chunk)
+            .map_err(|err| block("G14", err.to_string()))?;
+        sha256.update(chunk);
+        sha1.update(chunk);
+    }
+    file.sync_all()
+        .map_err(|err| block("G14", err.to_string()))?;
+    Ok((hex(sha256.finalize()), hex(sha1.finalize())))
 }
 
-fn sha1_hex(bytes: &[u8]) -> String {
-    hex(Sha1::digest(bytes))
+fn over_catalogue_cap(len: u64) -> bool {
+    len > MAX_BLOCK_LEN
+}
+
+fn hash_chunks(bytes: &[u8]) -> (String, String) {
+    let mut sha256 = Sha256::new();
+    let mut sha1 = Sha1::new();
+    for chunk in bytes.chunks(64 * 1024) {
+        sha256.update(chunk);
+        sha1.update(chunk);
+    }
+    (hex(sha256.finalize()), hex(sha1.finalize()))
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex(Sha256::digest(bytes))
 }
 
 fn hex(bytes: impl AsRef<[u8]>) -> String {
@@ -400,6 +470,22 @@ mod tests {
             .unwrap();
         assert!(cat.timeout.as_secs() >= 60);
         assert!(cat.watchdog.is_some_and(|wait| wait.as_secs() >= 60));
+        let budget = crate::timeouts::read_budget(&crate::cmd::ReadCmd::ExecOutSu(
+            crate::cmd::ExecOutSuRead::CatBlock {
+                serial: serial(),
+                root: crate::cmd::ByNameRoot::ByName,
+                partition: Partition::InitBoot,
+                slot: Slot::A,
+            },
+        ));
+        assert_eq!(cat.timeout, budget.timeout);
+        assert_eq!(cat.watchdog, budget.watchdog);
+        let cats = runner
+            .calls()
+            .into_iter()
+            .filter(|call| call.args.iter().any(|arg| arg.contains("cat")))
+            .count();
+        assert_eq!(cats, 8);
         let _ = fs::remove_dir_all(&dest);
     }
 
@@ -423,5 +509,34 @@ mod tests {
         assert_eq!(err.id, "G14");
         assert!(err.reason.contains("truncated"));
         let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[tokio::test]
+    async fn a_second_read_that_differs_from_the_phone_blocks() {
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.on_fn(adb_name(), &["-s", "synth-komodo-1"], |call, hit| {
+            let joined = call.args.join(" ");
+            if joined.contains("exec-out") && hit == 2 {
+                return ScriptedResponse::ok(b"not-the-same-bytes".to_vec());
+            }
+            answer(call)
+        });
+        let transport = scripted(runner);
+        let dest = std::env::temp_dir().join(format!(
+            "flashwright-backup-mismatch-{}",
+            std::process::id()
+        ));
+        let err = capture_stock(&transport, &serial(), Slot::A, Partition::InitBoot, &dest)
+            .await
+            .unwrap_err();
+        assert_eq!(err.id, "G14");
+        assert!(err.reason.contains("SHA-256"));
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn catalogue_cap_rejects_an_oversized_length() {
+        assert!(!over_catalogue_cap(MAX_BLOCK_LEN));
+        assert!(over_catalogue_cap(MAX_BLOCK_LEN + 1));
     }
 }

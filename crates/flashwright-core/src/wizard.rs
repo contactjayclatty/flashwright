@@ -19,11 +19,12 @@ use crate::cmd::{DeviceSerial, ReadCmd, WriteCmd};
 use crate::device::{PlatformToolsTransport, Slot};
 use crate::parse::{self, Verdict};
 use crate::proc::CommandRunner;
-use crate::safety::{self, BackupSet, BackupState, SafetyFacts};
+use crate::safety::{self, BackupSet, BackupState, FactEvidence, SafetyFacts};
 use crate::token::mint_confirmed;
 use crate::CoreError;
 
 pub const PLAN_SCHEMA: &str = "flashwright.plan.v1";
+pub const PLAN_TTL_MS: i64 = 15 * 60 * 1000;
 
 /// Window phases. Only [`Phase::Review`] may confirm or dry-run a plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,11 +81,11 @@ pub struct FirmwareClaim {
     pub image_fingerprint: Option<String>,
 }
 
+/// What the operator wants done. Core reads every fact from the phone.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PlanDraft {
+pub struct PlanRequest {
     pub serial: String,
     pub dry_run: bool,
-    pub expires_unix_ms: i64,
     pub steps: Vec<PlanStep>,
     pub firmware: FirmwareClaim,
 }
@@ -125,6 +126,13 @@ struct FactSnap {
     firmware_spl: Option<String>,
     magisk_code: Option<u32>,
     kernel: Option<String>,
+    evidence: Vec<EvidenceSnap>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct EvidenceSnap {
+    source: String,
+    sha256: String,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -178,6 +186,7 @@ struct HeldPlan {
     dry_run: bool,
     steps: Vec<PlanStep>,
     serial: String,
+    firmware: FirmwareClaim,
     facts: Option<FactSnap>,
     gates: Vec<GateSnap>,
     backup: Option<BackupSnap>,
@@ -197,9 +206,7 @@ pub struct WizardSession<R: CommandRunner> {
     transport: PlatformToolsTransport<R>,
     safety: Option<SafetyFacts>,
     backup: Option<BackupState>,
-    nonce_seq: u64,
-    consumed: BTreeSet<String>,
-    discarded: BTreeSet<String>,
+    used: BTreeSet<String>,
 }
 
 impl<R: CommandRunner> WizardSession<R> {
@@ -215,9 +222,7 @@ impl<R: CommandRunner> WizardSession<R> {
             transport,
             safety: None,
             backup: None,
-            nonce_seq: 0,
-            consumed: BTreeSet::new(),
-            discarded: BTreeSet::new(),
+            used: BTreeSet::new(),
         }
     }
 
@@ -260,65 +265,98 @@ impl<R: CommandRunner> WizardSession<R> {
         Ok(self.transport.run_read(cmd).await?)
     }
 
-    /// Store a plan and move to review. Facts, gates, the backup, and timeouts are in the hash.
-    pub fn build_plan(&mut self, mut draft: PlanDraft) -> Result<PlanPreview, CoreError> {
+    /// Store a plan and move to review.
+    ///
+    /// The caller describes the work. Core reads the phone, hashes the files,
+    /// and puts those facts, their evidence, the gates, the backup, the
+    /// timeouts, and a random nonce into the plan hash. The plan expires
+    /// fifteen minutes after it is built.
+    pub async fn build_plan(&mut self, mut request: PlanRequest) -> Result<PlanPreview, CoreError> {
         if self.phase == Phase::Flash {
             return Err(rejected("A job is already running."));
         }
-        if self.clock.unix_ms() > draft.expires_unix_ms {
-            self.note_discard_input();
-            return Err(rejected("The plan has expired. Build it again."));
-        }
-        if let Err(err) = check_serial(&draft) {
+        let expires_unix_ms = self.clock.unix_ms().saturating_add(PLAN_TTL_MS);
+        if let Err(err) = check_serial(&request) {
             self.note_discard_input();
             return Err(err);
         }
-        seal_image_sizes(&mut draft.steps)?;
-        let views = step_views(&draft.steps)?;
-        let facts = sealed_facts(self.safety.clone(), &draft);
-        let decisions = safety::evaluate(&draft.steps, facts.as_ref(), self.backup.as_ref());
-        let nonce = self.next_nonce();
+        seal_image_sizes(&mut request.steps)?;
+        let views = step_views(&request.steps)?;
+        let facts = self.collect_facts(&request).await;
+        let decisions = safety::evaluate(&request.steps, Some(&facts), self.backup.as_ref());
+        let nonce = Self::next_nonce()?;
         let acks = Vec::new();
-        let snap = facts.as_ref().map(fact_snap);
+        let snap = fact_snap(&facts);
         let gates = gate_snaps(&decisions, &acks);
         let backup = backup_snap(self.backup.as_ref());
-        let timeouts = step_timeouts(&draft.steps);
+        let timeouts = step_timeouts(&request.steps);
         let hash = hash_plan(
-            &draft,
+            &request,
             &nonce,
-            snap.as_ref(),
+            expires_unix_ms,
+            Some(&snap),
             &gates,
             backup.as_ref(),
             &timeouts,
             &acks,
         )?;
-        if self.consumed.contains(&hash) || self.discarded.contains(&hash) {
+        if self.used.contains(&hash) {
             return Err(rejected("That plan was already used."));
         }
         let preview = PlanPreview {
             plan_code: plan_code(&hash),
             plan_hash: hash.clone(),
-            expires_unix_ms: draft.expires_unix_ms,
-            dry_run: draft.dry_run,
+            expires_unix_ms,
+            dry_run: request.dry_run,
             steps: views,
         };
         self.held = Some(HeldPlan {
             hash,
             nonce,
-            expires_unix_ms: draft.expires_unix_ms,
-            dry_run: draft.dry_run,
-            steps: draft.steps,
-            serial: draft.serial,
-            facts: snap,
+            expires_unix_ms,
+            dry_run: request.dry_run,
+            steps: request.steps,
+            serial: request.serial,
+            firmware: request.firmware,
+            facts: Some(snap),
             gates,
             backup,
             timeouts,
             acks,
             life: PlanLife::Issued,
         });
-        self.safety = facts;
+        self.safety = Some(facts);
         self.phase = Phase::Review;
         Ok(preview)
+    }
+
+    async fn collect_facts(&self, request: &PlanRequest) -> SafetyFacts {
+        let mut facts = match crate::cmd::DeviceSerial::try_from(request.serial.as_str()) {
+            Ok(serial) => observe_phone(&self.transport, &serial)
+                .await
+                .unwrap_or_else(|_| empty_facts()),
+            Err(_) => empty_facts(),
+        };
+        apply_firmware(&mut facts, request);
+        hash_images(&mut facts, &request.steps);
+        if facts.host_free_bytes.is_none() {
+            facts.host_free_bytes = host_free_bytes();
+        }
+        facts
+    }
+
+    async fn reprobe(&mut self) -> Result<(), CoreError> {
+        let request = {
+            let held = self.held.as_ref().expect("plan");
+            PlanRequest {
+                serial: held.serial.clone(),
+                dry_run: held.dry_run,
+                steps: held.steps.clone(),
+                firmware: held.firmware.clone(),
+            }
+        };
+        self.safety = Some(self.collect_facts(&request).await);
+        Ok(())
     }
 
     /// Record an acknowledgement. The new plan hash covers that acknowledgement.
@@ -357,13 +395,13 @@ impl<R: CommandRunner> WizardSession<R> {
             held.acks.push(gate_id.to_string());
             held.acks.sort();
         }
-        let draft = PlanDraft {
+        let request = PlanRequest {
             serial: held.serial.clone(),
             dry_run: held.dry_run,
-            expires_unix_ms: held.expires_unix_ms,
             steps: held.steps.clone(),
-            firmware: FirmwareClaim::default(),
+            firmware: held.firmware.clone(),
         };
+        let expires = held.expires_unix_ms;
         let decisions = safety::evaluate_acked(
             &held.steps,
             self.safety.as_ref(),
@@ -372,8 +410,9 @@ impl<R: CommandRunner> WizardSession<R> {
         );
         held.gates = gate_snaps(&decisions, &held.acks);
         held.hash = hash_plan(
-            &draft,
+            &request,
             &held.nonce,
+            expires,
             held.facts.as_ref(),
             &held.gates,
             held.backup.as_ref(),
@@ -409,7 +448,7 @@ impl<R: CommandRunner> WizardSession<R> {
         let mut lines = safety::dry_run_lines(&held.steps, &decisions);
         if lines.iter().all(|line| !line.starts_with("WOULD BLOCK")) {
             for step in &held.steps {
-                let blocks = safety::pre_step_blocks(step, self.safety.as_ref());
+                let blocks = safety::evaluate_step(step, self.safety.as_ref());
                 if !blocks.is_empty() {
                     lines = blocks
                         .iter()
@@ -442,6 +481,7 @@ impl<R: CommandRunner> WizardSession<R> {
         if dry_run {
             return Err(rejected("A dry-run plan does not write."));
         }
+        self.reprobe().await?;
         let steps = self.held.as_ref().expect("plan").steps.clone();
         let acks = self.held.as_ref().expect("plan").acks.clone();
         let decisions =
@@ -511,7 +551,7 @@ impl<R: CommandRunner> WizardSession<R> {
     ) -> Result<String, CoreError> {
         if let PlanStep::Write(cmd) = step {
             self.refresh_live(cmd).await?;
-            let blocks = safety::pre_step_blocks(step, self.safety.as_ref());
+            let blocks = safety::evaluate_step(step, self.safety.as_ref());
             if let Some(gate) = blocks.first() {
                 return Err(rejected(format!("Blocked: {} {}", gate.id, gate.reason)));
             }
@@ -609,17 +649,18 @@ impl<R: CommandRunner> WizardSession<R> {
         Ok(())
     }
 
-    fn next_nonce(&mut self) -> String {
-        self.nonce_seq = self.nonce_seq.saturating_add(1);
-        format!(
-            "{:016x}{:016x}",
-            self.clock.unix_ms() as u64,
-            self.nonce_seq
-        )
+    fn next_nonce() -> Result<String, CoreError> {
+        let mut bytes = [0u8; 16];
+        fill_csprng(&mut bytes)?;
+        let mut nonce = String::with_capacity(32);
+        for byte in bytes {
+            nonce.push_str(&format!("{byte:02x}"));
+        }
+        Ok(nonce)
     }
 
     fn consume(&mut self, hash: &str) {
-        self.consumed.insert(hash.to_string());
+        self.used.insert(hash.to_string());
         if let Some(held) = self.held.as_mut() {
             if held.hash == hash {
                 held.life = PlanLife::Consumed;
@@ -629,7 +670,7 @@ impl<R: CommandRunner> WizardSession<R> {
     }
 
     fn discard(&mut self, hash: &str) {
-        self.discarded.insert(hash.to_string());
+        self.used.insert(hash.to_string());
         if let Some(held) = self.held.as_mut() {
             if held.hash == hash {
                 held.life = PlanLife::Discarded;
@@ -653,14 +694,14 @@ fn rejected(reason: impl Into<String>) -> CoreError {
     }
 }
 
-fn check_serial(draft: &PlanDraft) -> Result<(), CoreError> {
-    for step in &draft.steps {
+fn check_serial(request: &PlanRequest) -> Result<(), CoreError> {
+    for step in &request.steps {
         let serial = match step {
             PlanStep::Read(cmd) => cmd.serial().map(|serial| serial.as_str()),
             PlanStep::Write(cmd) => Some(cmd.serial().as_str()),
         };
         if let Some(serial) = serial {
-            if serial != draft.serial {
+            if serial != request.serial {
                 return Err(rejected("A plan step names a different phone."));
             }
         }
@@ -689,13 +730,15 @@ fn step_views(steps: &[PlanStep]) -> Result<Vec<PlanStepView>, CoreError> {
     Ok(views)
 }
 
-pub fn plan_hash(draft: &PlanDraft) -> Result<String, CoreError> {
-    hash_plan(draft, "", None, &[], None, &[], &[])
+pub fn plan_hash(request: &PlanRequest, expires_unix_ms: i64) -> Result<String, CoreError> {
+    hash_plan(request, "", expires_unix_ms, None, &[], None, &[], &[])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn hash_plan(
-    draft: &PlanDraft,
+    request: &PlanRequest,
     nonce: &str,
+    expires_unix_ms: i64,
     facts: Option<&FactSnap>,
     gates: &[GateSnap],
     backup: Option<&BackupSnap>,
@@ -704,11 +747,11 @@ fn hash_plan(
 ) -> Result<String, CoreError> {
     let body = PlanBody {
         schema: PLAN_SCHEMA,
-        serial: &draft.serial,
+        serial: &request.serial,
         nonce,
-        dry_run: draft.dry_run,
-        expires_unix_ms: draft.expires_unix_ms,
-        steps: &draft.steps,
+        dry_run: request.dry_run,
+        expires_unix_ms,
+        steps: &request.steps,
         facts,
         gates,
         backup,
@@ -740,6 +783,14 @@ fn fact_snap(facts: &SafetyFacts) -> FactSnap {
         firmware_spl: facts.firmware_spl.clone(),
         magisk_code: facts.magisk_code,
         kernel: facts.kernel.clone(),
+        evidence: facts
+            .evidence
+            .iter()
+            .map(|item| EvidenceSnap {
+                source: item.source.clone(),
+                sha256: item.sha256.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -820,37 +871,36 @@ fn write_size(cmd: &WriteCmd) -> u64 {
     }
 }
 
-fn sealed_facts(mut facts: Option<SafetyFacts>, draft: &PlanDraft) -> Option<SafetyFacts> {
-    let facts = facts.as_mut()?;
-    if !draft.firmware.codename.is_empty() {
-        facts.firmware_codename = draft.firmware.codename.clone();
+fn apply_firmware(facts: &mut SafetyFacts, request: &PlanRequest) {
+    if !request.firmware.codename.is_empty() {
+        facts.firmware_codename = request.firmware.codename.clone();
     }
-    if !draft.firmware.filename.is_empty() {
-        facts.firmware_filename = draft.firmware.filename.clone();
+    if !request.firmware.filename.is_empty() {
+        facts.firmware_filename = request.firmware.filename.clone();
     }
-    if draft.firmware.spl.is_some() {
-        facts.firmware_spl = draft.firmware.spl.clone();
-        facts.image_spl = draft
+    if request.firmware.spl.is_some() {
+        facts.firmware_spl = request.firmware.spl.clone();
+        facts.image_spl = request
             .firmware
             .image_spl
             .clone()
-            .or(draft.firmware.spl.clone());
+            .or(request.firmware.spl.clone());
     }
-    if draft.firmware.fingerprint.is_some() {
-        facts.firmware_fingerprint = draft.firmware.fingerprint.clone();
-        facts.image_fingerprint = draft
+    if request.firmware.fingerprint.is_some() {
+        facts.firmware_fingerprint = request.firmware.fingerprint.clone();
+        facts.image_fingerprint = request
             .firmware
             .image_fingerprint
             .clone()
-            .or(draft.firmware.fingerprint.clone());
+            .or(request.firmware.fingerprint.clone());
     }
-    if draft.firmware.timestamp.is_some() {
-        facts.firmware_timestamp = draft.firmware.timestamp;
+    if request.firmware.timestamp.is_some() {
+        facts.firmware_timestamp = request.firmware.timestamp;
     }
-    if draft.firmware.bootloader.is_some() {
-        facts.firmware_bootloader = draft.firmware.bootloader.clone();
+    if request.firmware.bootloader.is_some() {
+        facts.firmware_bootloader = request.firmware.bootloader.clone();
     }
-    if let Some(partition) = draft.steps.iter().find_map(|step| match step {
+    if let Some(partition) = request.steps.iter().find_map(|step| match step {
         PlanStep::Write(WriteCmd::Fastboot(crate::cmd::FastbootWrite::Flash {
             partition, ..
         })) => Some(*partition),
@@ -861,7 +911,72 @@ fn sealed_facts(mut facts: Option<SafetyFacts>, draft: &PlanDraft) -> Option<Saf
     if facts.plan_device.is_empty() {
         facts.plan_device = facts.device_codename.clone();
     }
-    Some(facts.clone())
+}
+
+fn hash_images(facts: &mut SafetyFacts, steps: &[PlanStep]) {
+    let mut image_sha = None;
+    for step in steps {
+        let Some(path) = image_path(step) else {
+            continue;
+        };
+        if let Some(digest) = hash_file(Path::new(path)) {
+            image_sha = Some(digest);
+        }
+    }
+    if let Some(digest) = image_sha {
+        facts.image_sha256 = Some(digest.clone());
+        facts.evidence.push(FactEvidence {
+            source: "image-file".into(),
+            sha256: digest.clone(),
+        });
+        if facts.firmware_sha256.is_none() {
+            facts.firmware_sha256 = Some(digest);
+        }
+    }
+    let firmware = Path::new(&facts.firmware_filename);
+    if firmware.is_file() {
+        if let Some(digest) = hash_file(firmware) {
+            facts.firmware_sha256 = Some(digest.clone());
+            facts.evidence.push(FactEvidence {
+                source: "firmware-file".into(),
+                sha256: digest,
+            });
+        }
+    }
+}
+
+fn image_path(step: &PlanStep) -> Option<&str> {
+    match step {
+        PlanStep::Write(WriteCmd::Fastboot(
+            crate::cmd::FastbootWrite::Flash { image, .. }
+            | crate::cmd::FastbootWrite::Update { package: image, .. },
+        ))
+        | PlanStep::Write(WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Sideload {
+            package: image,
+            ..
+        })) => Some(image.path()),
+        PlanStep::Write(WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Push {
+            src: crate::cmd::HostRef::Image(image),
+            ..
+        })) => Some(image.path()),
+        _ => None,
+    }
+}
+
+fn hash_file(path: &Path) -> Option<String> {
+    use sha2::Digest;
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buf).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Some(safety::sha256_hex(&hasher.finalize()))
 }
 
 fn empty_facts() -> SafetyFacts {
@@ -962,6 +1077,8 @@ async fn observe_phone<R: CommandRunner>(
     let codename = props.get("ro.product.device").cloned().unwrap_or_default();
     let (verified, matched, server) = transport.tool_gate();
     let mut facts = empty_facts();
+    note(&mut facts, "adb-devices", &devices.stdout);
+    note(&mut facts, "getprop", &props_run.stdout);
     facts.device_codename = codename.clone();
     facts.plan_device = codename;
     facts.authorised_devices = authorised;
@@ -1050,7 +1167,140 @@ async fn observe_phone<R: CommandRunner>(
             }
         }
     }
+    if let Ok(battery) = transport
+        .run_read(ReadCmd::AdbShell(AdbShellRead::DumpsysBattery {
+            serial: serial.clone(),
+        }))
+        .await
+    {
+        if battery.success_exit() {
+            note(&mut facts, "dumpsys-battery", &battery.stdout);
+            facts.battery_percent = crate::device::parse_battery(&battery.stdout_text()).level;
+        }
+    }
+    if let Ok(disk) = transport
+        .run_read(ReadCmd::AdbShell(AdbShellRead::DumpsysDiskstats {
+            serial: serial.clone(),
+        }))
+        .await
+    {
+        if disk.success_exit() {
+            note(&mut facts, "dumpsys-diskstats", &disk.stdout);
+            facts.device_free_bytes = parse_free_bytes(&disk.stdout_text());
+        }
+    }
+    // A completed phone read is the evidence the host talked to this device.
+    facts.driver_ok = true;
     Ok(facts)
+}
+
+fn note(facts: &mut SafetyFacts, source: &str, bytes: &[u8]) {
+    facts.evidence.push(FactEvidence {
+        source: source.to_string(),
+        sha256: safety::sha256_hex(bytes),
+    });
+}
+
+fn parse_free_bytes(text: &str) -> Option<u64> {
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("free_bytes:") {
+            return value.trim().parse().ok();
+        }
+    }
+    None
+}
+
+fn host_free_bytes() -> Option<u64> {
+    #[cfg(unix)]
+    {
+        let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: `stat` is a valid out-pointer and the path is a nul-terminated literal.
+        let rc = unsafe { libc::statvfs(c"/tmp".as_ptr(), stat.as_mut_ptr()) };
+        if rc != 0 {
+            return None;
+        }
+        // SAFETY: `statvfs` returned 0, so the struct was written.
+        let stat = unsafe { stat.assume_init() };
+        Some(stat.f_bavail.saturating_mul(stat.f_frsize))
+    }
+    #[cfg(windows)]
+    {
+        windows_free_bytes()
+    }
+}
+
+#[cfg(windows)]
+fn windows_free_bytes() -> Option<u64> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(
+            directory: *const u16,
+            available: *mut u64,
+            total: *mut u64,
+            free: *mut u64,
+        ) -> i32;
+    }
+    let dir: Vec<u16> = {
+        use std::os::windows::ffi::OsStrExt;
+        std::env::temp_dir()
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    };
+    let mut available = 0u64;
+    // SAFETY: `dir` is a nul-terminated wide path and `available` is a valid out-pointer.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            dir.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        None
+    } else {
+        Some(available)
+    }
+}
+
+fn fill_csprng(buf: &mut [u8]) -> Result<(), CoreError> {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let mut file = std::fs::File::open("/dev/urandom")
+            .map_err(|err| rejected(format!("The plan nonce could not be drawn: {err}")))?;
+        file.read_exact(buf)
+            .map_err(|err| rejected(format!("The plan nonce could not be drawn: {err}")))?;
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        #[link(name = "bcrypt")]
+        extern "system" {
+            fn BCryptGenRandom(
+                algorithm: *mut std::ffi::c_void,
+                buffer: *mut u8,
+                length: u32,
+                flags: u32,
+            ) -> i32;
+        }
+        // SAFETY: `buf` is a writable byte slice. Flag 0x2 is BCRYPT_USE_SYSTEM_PREFERRED_RNG.
+        let status = unsafe {
+            BCryptGenRandom(
+                std::ptr::null_mut(),
+                buf.as_mut_ptr(),
+                u32::try_from(buf.len()).unwrap_or(u32::MAX),
+                0x0000_0002,
+            )
+        };
+        if status != 0 {
+            return Err(rejected("The plan nonce could not be drawn."));
+        }
+        Ok(())
+    }
 }
 
 pub fn plan_code(hash: &str) -> String {
@@ -1130,17 +1380,115 @@ mod tests {
         WizardSession::with_clock(transport, Box::new(FixedClock(now)))
     }
 
-    fn draft(dry_run: bool, expires: i64) -> PlanDraft {
-        PlanDraft {
+    fn adb_bin() -> &'static str {
+        if cfg!(windows) {
+            "adb.exe"
+        } else {
+            "adb"
+        }
+    }
+
+    fn fastboot_bin() -> &'static str {
+        if cfg!(windows) {
+            "fastboot.exe"
+        } else {
+            "fastboot"
+        }
+    }
+
+    fn draft(dry_run: bool, _expires: i64) -> PlanRequest {
+        PlanRequest {
             serial: "pixel1".into(),
             dry_run,
-            expires_unix_ms: expires,
             steps: vec![PlanStep::Write(WriteCmd::AdbHost(AdbHostWrite::Reboot {
                 serial: serial(),
                 mode: RebootMode::System,
             }))],
             firmware: FirmwareClaim::default(),
         }
+    }
+
+    fn komodo_props() -> String {
+        [
+            "[ro.product.device]: [komodo]",
+            "[ro.boot.flash.locked]: [0]",
+            "[persist.sys.update.pending]: [0]",
+            "[ro.boot.slot_suffix]: [_a]",
+            "[ro.build.version.security_patch]: [2026-02-01]",
+            "[ro.build.id]: [TEST.260201.001]",
+            "[ro.build.fingerprint]: [synthetic/komodo/test]",
+            "[ro.build.date.utc]: [1700000000]",
+            "[ro.build.version.sdk]: [34]",
+            "[ro.bootloader]: [16.2-100]",
+            "[ro.kernel.version]: [6.1.0-android14-synthetic]",
+        ]
+        .join("\n")
+    }
+
+    fn oriole_props() -> String {
+        [
+            "[ro.product.device]: [oriole]",
+            "[ro.boot.flash.locked]: [0]",
+            "[persist.sys.update.pending]: [0]",
+            "[ro.boot.slot_suffix]: [_a]",
+            "[ro.bootloader]: [15.3-13239611]",
+        ]
+        .join("\n")
+    }
+
+    fn script_phone(runner: &ScriptedRunner, phone: &str, props: String) {
+        runner.on(
+            adb_bin(),
+            &["devices", "-l"],
+            ScriptedResponse::ok(format!("List of devices attached\n{phone} device\n")),
+        );
+        runner.on_fn(adb_bin(), &["-s", phone, "shell"], move |call, _hit| {
+            let remote = call.args.last().map(String::as_str).unwrap_or("");
+            if remote.contains("-V") {
+                ScriptedResponse::ok("30700\n")
+            } else if remote.contains("magisk") {
+                ScriptedResponse::ok("30.7\n")
+            } else if remote.contains("battery") {
+                ScriptedResponse::ok("level: 80\n")
+            } else if remote.contains("diskstats") {
+                ScriptedResponse::ok("free_bytes: 8000000000\n")
+            } else if remote.contains("getprop") {
+                ScriptedResponse::ok(props.clone())
+            } else {
+                ScriptedResponse::ok("")
+            }
+        });
+    }
+
+    fn script_partition_sizes(runner: &ScriptedRunner, phone: &str) {
+        runner.on(
+            fastboot_bin(),
+            &["-s", phone, "getvar"],
+            ScriptedResponse::ok("0x4000000\n"),
+        );
+    }
+
+    fn temp_image() -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "flashwright-img-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("init_boot.img");
+        std::fs::write(&path, b"synthetic-komodo-init-boot").unwrap();
+        (dir, path)
+    }
+
+    fn reboot_calls(runner: &ScriptedRunner) -> usize {
+        runner
+            .calls()
+            .iter()
+            .filter(|call| call.args.last().is_some_and(|arg| arg == "reboot"))
+            .count()
     }
 
     fn install_tools(transport: &PlatformToolsTransport<ScriptedRunner>) {
@@ -1188,20 +1536,37 @@ mod tests {
         let _gate = gate().await;
         let runner = Arc::new(ScriptedRunner::new());
         let mut session = session(Arc::clone(&runner), 1_000);
-        let preview = session.build_plan(draft(true, 5_000)).unwrap();
+        let preview = session.build_plan(draft(true, 5_000)).await.unwrap();
         assert_eq!(session.phase(), Phase::Review);
+        assert_eq!(preview.expires_unix_ms, 1_000 + PLAN_TTL_MS);
         assert!(preview.plan_hash.starts_with("flp1-"));
         let real = hash_plan(
             &draft(false, 5_000),
             "same-nonce",
+            5_000,
             None,
             &[],
             None,
             &[],
             &[],
         );
-        let dry = hash_plan(&draft(true, 5_000), "same-nonce", None, &[], None, &[], &[]);
+        let dry = hash_plan(
+            &draft(true, 5_000),
+            "same-nonce",
+            5_000,
+            None,
+            &[],
+            None,
+            &[],
+            &[],
+        );
         assert_ne!(real.unwrap(), dry.unwrap());
+        let refused = session
+            .confirm_and_run(&preview.plan_hash)
+            .await
+            .unwrap_err();
+        assert!(refused.to_string().contains("does not write"));
+        assert_eq!(session.phase(), Phase::Review);
         let before = open_run_count();
         let lines = session.dry_run(&preview.plan_hash).unwrap();
         assert!(lines.iter().any(|line| line.contains("G02")));
@@ -1220,25 +1585,33 @@ mod tests {
     async fn confirm_is_single_use_and_refused_outside_review() {
         let _gate = gate().await;
         let runner = Arc::new(ScriptedRunner::new());
-        let mut session = session(Arc::clone(&runner), 1_000);
+        let open = session;
+        let mut session = open(Arc::clone(&runner), 1_000);
         let err = session.confirm_and_run("flp1-missing").await.unwrap_err();
         assert!(err.to_string().contains("review"));
-        let preview = session.build_plan(draft(false, 5_000)).unwrap();
-        session.safety = Some(crate::safety::SafetyFacts::komodo_ready());
+        script_phone(&runner, "pixel1", komodo_props());
+        let mut session = open(Arc::clone(&runner), 1_000);
         install_tools(session.transport());
+        let preview = session.build_plan(draft(false, 5_000)).await.unwrap();
+        let wrong = session
+            .confirm_and_run("flp1-not-issued")
+            .await
+            .unwrap_err();
+        assert!(wrong.to_string().contains("not issued"));
+        assert_eq!(session.phase(), Phase::Review);
         let not_dry = session.dry_run(&preview.plan_hash).unwrap_err();
         assert!(not_dry.to_string().contains("not a dry run"));
         assert_eq!(session.phase(), Phase::Review);
         let report = session.confirm_and_run(&preview.plan_hash).await.unwrap();
-        assert!(report.lines.len() == 1);
+        assert_eq!(report.lines.len(), 1);
+        assert_eq!(reboot_calls(&runner), 1);
         assert_eq!(session.phase(), Phase::Done);
-        assert_eq!(runner.calls().len(), 1);
         let again = session
             .confirm_and_run(&preview.plan_hash)
             .await
             .unwrap_err();
         assert!(again.to_string().contains("already used"));
-        assert_eq!(runner.calls().len(), 1);
+        assert_eq!(reboot_calls(&runner), 1);
     }
 
     #[tokio::test]
@@ -1246,8 +1619,8 @@ mod tests {
         let _gate = gate().await;
         let runner = Arc::new(ScriptedRunner::new());
         let mut session = session(runner, 1_000);
-        let preview = session.build_plan(draft(false, 1_500)).unwrap();
-        session.clock = Box::new(FixedClock(1_501));
+        let preview = session.build_plan(draft(false, 1_500)).await.unwrap();
+        session.clock = Box::new(FixedClock(1_000 + PLAN_TTL_MS + 1));
         let err = session.dry_run(&preview.plan_hash).unwrap_err();
         assert!(err.to_string().contains("expired"));
         let err = session
@@ -1262,16 +1635,15 @@ mod tests {
         DeviceSerial::try_from("synth-komodo-1").unwrap()
     }
 
-    fn flash_draft(dry_run: bool, expires: i64) -> PlanDraft {
-        PlanDraft {
+    fn flash_draft(dry_run: bool, image: &str) -> PlanRequest {
+        PlanRequest {
             serial: "synth-komodo-1".into(),
             dry_run,
-            expires_unix_ms: expires,
             steps: vec![PlanStep::Write(WriteCmd::Fastboot(FastbootWrite::Flash {
                 serial: komodo_serial(),
                 slot: Slot::B,
                 partition: Partition::InitBoot,
-                image: ImageRef::new(1, "/var/flashwright/init_boot.img", 4096),
+                image: ImageRef::new(1, image, 4096),
             }))],
             firmware: FirmwareClaim {
                 codename: "komodo".into(),
@@ -1292,7 +1664,10 @@ mod tests {
         let runner = Arc::new(ScriptedRunner::new());
         let open = session;
         let mut session = open(Arc::clone(&runner), 1_000);
-        let preview = session.build_plan(flash_draft(true, 5_000)).unwrap();
+        let preview = session
+            .build_plan(flash_draft(true, "/var/flashwright/missing.img"))
+            .await
+            .unwrap();
         let before = open_run_count();
         let lines = session.dry_run(&preview.plan_hash).unwrap();
         assert!(lines.iter().any(|line| line.starts_with("WOULD BLOCK:")));
@@ -1302,7 +1677,8 @@ mod tests {
         assert_eq!(session.phase(), Phase::Done);
         let mut confirm_session = open(Arc::clone(&runner), 1_000);
         let preview = confirm_session
-            .build_plan(flash_draft(false, 5_000))
+            .build_plan(flash_draft(false, "/var/flashwright/missing.img"))
+            .await
             .unwrap();
         let err = confirm_session
             .confirm_and_run(&preview.plan_hash)
@@ -1317,26 +1693,12 @@ mod tests {
     #[tokio::test]
     async fn verified_init_boot_lets_the_dry_run_pass() {
         let _gate = gate().await;
-        let stock = b"synthetic-komodo-init-boot".to_vec();
+        let (dir, image) = temp_image();
         let runner = Arc::new(ScriptedRunner::new());
-        let seen = stock.clone();
-        let name = if cfg!(windows) { "adb.exe" } else { "adb" };
-        runner.on_fn(
-            name,
-            &["-s", "synth-komodo-1", "exec-out"],
-            move |_call, _hit| ScriptedResponse::ok(seen.clone()),
-        );
+        script_phone(&runner, "synth-komodo-1", komodo_props());
+        script_partition_sizes(&runner, "synth-komodo-1");
         let mut session = session(Arc::clone(&runner), 1_000);
-        session.safety = Some(crate::safety::SafetyFacts::komodo_ready());
-        let record = session
-            .backup_stock(
-                &komodo_serial(),
-                crate::device::Slot::B,
-                Partition::InitBoot,
-                &std::env::temp_dir().join(format!("flashwright-wiz-{}", std::process::id())),
-            )
-            .await;
-        let _ = record;
+        install_tools(session.transport());
         session.backup = Some(crate::safety::BackupState::Verified(
             crate::safety::BackupSet::bound(
                 "set-komodo",
@@ -1346,7 +1708,10 @@ mod tests {
                 Partition::InitBoot,
             ),
         ));
-        let preview = session.build_plan(flash_draft(true, 5_000)).unwrap();
+        let preview = session
+            .build_plan(flash_draft(true, image.to_string_lossy().as_ref()))
+            .await
+            .unwrap();
         let before = open_run_count();
         let calls = runner.calls().len();
         let lines = session.dry_run(&preview.plan_hash).unwrap();
@@ -1358,12 +1723,13 @@ mod tests {
         assert_eq!(runner.calls().len(), calls);
         assert_eq!(open_run_count(), before);
         assert_eq!(session.phase(), Phase::Done);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn plan_hash_covers_facts_gates_backup_timeouts_and_nonce() {
         let draft = draft(false, 5_000);
-        let base = hash_plan(&draft, "n1", None, &[], None, &[], &[]).unwrap();
+        let base = hash_plan(&draft, "n1", 5_000, None, &[], None, &[], &[]).unwrap();
         let facts = FactSnap {
             device: "komodo".into(),
             firmware: "komodo".into(),
@@ -1379,10 +1745,14 @@ mod tests {
             firmware_spl: None,
             magisk_code: None,
             kernel: None,
+            evidence: vec![EvidenceSnap {
+                source: "getprop".into(),
+                sha256: "ab".repeat(32),
+            }],
         };
         assert_ne!(
             base,
-            hash_plan(&draft, "n1", Some(&facts), &[], None, &[], &[]).unwrap()
+            hash_plan(&draft, "n1", 5_000, Some(&facts), &[], None, &[], &[]).unwrap()
         );
         let gates = vec![GateSnap {
             id: "G03".into(),
@@ -1391,7 +1761,7 @@ mod tests {
         }];
         assert_ne!(
             base,
-            hash_plan(&draft, "n1", None, &gates, None, &[], &[]).unwrap()
+            hash_plan(&draft, "n1", 5_000, None, &gates, None, &[], &[]).unwrap()
         );
         let backup = BackupSnap {
             set_id: "set".into(),
@@ -1402,7 +1772,7 @@ mod tests {
         };
         assert_ne!(
             base,
-            hash_plan(&draft, "n1", None, &[], Some(&backup), &[], &[]).unwrap()
+            hash_plan(&draft, "n1", 5_000, None, &[], Some(&backup), &[], &[]).unwrap()
         );
         let timeouts = vec![TimeoutSnap {
             timeout_s: 90,
@@ -1410,15 +1780,15 @@ mod tests {
         }];
         assert_ne!(
             base,
-            hash_plan(&draft, "n1", None, &[], None, &timeouts, &[]).unwrap()
+            hash_plan(&draft, "n1", 5_000, None, &[], None, &timeouts, &[]).unwrap()
         );
         assert_ne!(
             base,
-            hash_plan(&draft, "n2", None, &[], None, &[], &[]).unwrap()
+            hash_plan(&draft, "n2", 5_000, None, &[], None, &[], &[]).unwrap()
         );
         assert_ne!(
             base,
-            hash_plan(&draft, "n1", None, &[], None, &[], &["G19".into()]).unwrap()
+            hash_plan(&draft, "n1", 5_000, None, &[], None, &[], &["G19".into()]).unwrap()
         );
     }
 
@@ -1426,39 +1796,23 @@ mod tests {
     async fn phone_reads_fill_gate_facts_and_a_later_read_blocks_the_step() {
         let _gate = gate().await;
         let runner = Arc::new(ScriptedRunner::new());
-        let name = if cfg!(windows) { "adb.exe" } else { "adb" };
-        let fastboot = if cfg!(windows) {
-            "fastboot.exe"
-        } else {
-            "fastboot"
-        };
-        runner.on(
-            name,
-            &["devices", "-l"],
-            ScriptedResponse::ok("List of devices attached\npixel1 device\n"),
-        );
-        runner.on(
-            name,
-            &["-s", "pixel1", "shell"],
-            ScriptedResponse::ok(
-                "[ro.product.device]: [komodo]\n[ro.boot.flash.locked]: [0]\n[persist.sys.update.pending]: [0]\n",
-            ),
-        );
-        runner.on(
-            fastboot,
-            &["-s", "synth-komodo-1", "getvar", "unlocked"],
-            ScriptedResponse::ok("unlocked: no\n"),
-        );
+        script_phone(&runner, "pixel1", komodo_props());
         let open = session;
         let mut session = open(Arc::clone(&runner), 1_000);
-        session.read_gate_facts(&serial()).await.unwrap();
-        let preview = session.build_plan(draft(true, 5_000)).unwrap();
+        let preview = session.build_plan(draft(true, 5_000)).await.unwrap();
         let lines = session.dry_run(&preview.plan_hash).unwrap();
         assert!(lines.iter().all(|line| !line.contains("G02 ")), "{lines:?}");
         assert!(lines.iter().any(|line| line.contains("G21")));
 
+        let (dir, image) = temp_image();
+        script_phone(&runner, "synth-komodo-1", komodo_props());
+        script_partition_sizes(&runner, "synth-komodo-1");
+        runner.on(
+            fastboot_bin(),
+            &["-s", "synth-komodo-1", "getvar", "unlocked"],
+            ScriptedResponse::ok("unlocked: no\n"),
+        );
         let mut session = open(Arc::clone(&runner), 1_000);
-        session.safety = Some(crate::safety::SafetyFacts::komodo_ready());
         session.backup = Some(crate::safety::BackupState::Verified(
             crate::safety::BackupSet::bound(
                 "set-komodo",
@@ -1469,7 +1823,10 @@ mod tests {
             ),
         ));
         install_tools(session.transport());
-        let preview = session.build_plan(flash_draft(false, 5_000)).unwrap();
+        let preview = session
+            .build_plan(flash_draft(false, image.to_string_lossy().as_ref()))
+            .await
+            .unwrap();
         let before = open_run_count();
         let err = session
             .confirm_and_run(&preview.plan_hash)
@@ -1482,37 +1839,28 @@ mod tests {
             .all(|call| !call.args.iter().any(|arg| arg == "flash")));
         assert_eq!(open_run_count(), before);
         assert_eq!(session.phase(), Phase::Recovery);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
     async fn acknowledge_changes_the_hash_and_cleanup_still_checks_gates() {
         let _gate = gate().await;
         let runner = Arc::new(ScriptedRunner::new());
-        let name = if cfg!(windows) { "adb.exe" } else { "adb" };
-        runner.on(
-            name,
-            &["-s", "pixel1", "reboot"],
-            ScriptedResponse::fail(1, "FAILED"),
-        );
-        runner.on(
-            name,
-            &["-s", "pixel1", "reboot", "bootloader"],
-            ScriptedResponse::ok(""),
-        );
+        script_phone(&runner, "pixel1", oriole_props());
         let open = session;
         let mut session = open(Arc::clone(&runner), 1_000);
-        let mut facts = crate::safety::SafetyFacts::komodo_ready();
-        facts.checks = crate::safety::LegacyChecks::fail("G17");
-        session.safety = Some(facts);
         install_tools(session.transport());
-        let preview = session.build_plan(draft(false, 5_000)).unwrap();
-        let acked = session.acknowledge(&preview.plan_hash, "G17").unwrap();
+        let preview = session.build_plan(draft(false, 5_000)).await.unwrap();
+        let acked = session.acknowledge(&preview.plan_hash, "G19").unwrap();
         assert_ne!(preview.plan_hash, acked.plan_hash);
         let refused = session.acknowledge(&acked.plan_hash, "G20").unwrap_err();
         assert!(refused.to_string().contains("cannot be acknowledged"));
 
         let mut blocked = open(runner, 1_000);
-        let preview = blocked.build_plan(flash_draft(false, 5_000)).unwrap();
+        let preview = blocked
+            .build_plan(flash_draft(false, "/var/flashwright/missing.img"))
+            .await
+            .unwrap();
         let before = open_run_count();
         let err = blocked
             .confirm_and_run_finally(&preview.plan_hash, 0)
@@ -1527,19 +1875,18 @@ mod tests {
     async fn cleanup_tail_runs_after_an_earlier_write_fails() {
         let _gate = gate().await;
         let runner = Arc::new(ScriptedRunner::new());
-        let name = if cfg!(windows) { "adb.exe" } else { "adb" };
+        script_phone(&runner, "pixel1", komodo_props());
         let mut session = session(Arc::clone(&runner), 1_000);
         runner.on(
-            name,
+            adb_bin(),
             &["-s", "pixel1", "reboot", "bootloader"],
             ScriptedResponse::ok(""),
         );
         runner.on(
-            name,
+            adb_bin(),
             &["-s", "pixel1", "reboot"],
             ScriptedResponse::fail(1, "FAILED"),
         );
-        session.safety = Some(crate::safety::SafetyFacts::komodo_ready());
         install_tools(session.transport());
         let mut plan = draft(false, 5_000);
         plan.steps
@@ -1547,7 +1894,7 @@ mod tests {
                 serial: serial(),
                 mode: RebootMode::Bootloader,
             })));
-        let preview = session.build_plan(plan).unwrap();
+        let preview = session.build_plan(plan).await.unwrap();
         let err = session
             .confirm_and_run_finally(&preview.plan_hash, 1)
             .await

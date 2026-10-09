@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::device::{Partition, Slot};
 
 pub const MAGISK_PACKAGE: &str = "com.topjohnwu.magisk";
-const MAX_BLOCK_LEN: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_BLOCK_LEN: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CmdError {

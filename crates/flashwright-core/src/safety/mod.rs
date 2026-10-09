@@ -11,13 +11,11 @@ mod evaluate;
 mod tables;
 
 pub use backup::{capture_stock, sha256_hex, BackupSet, BackupState};
-#[cfg(test)]
-pub(crate) use evaluate::LegacyChecks;
 pub use evaluate::{
     blocking, bootloader_older, dry_run_lines, gate_ids, needs_backup, parse_bootloader,
     spl_from_build, GateBlock, GateDecision, Severity,
 };
-pub(crate) use evaluate::{evaluate, evaluate_acked, pre_step_blocks, SafetyFacts};
+pub(crate) use evaluate::{evaluate, evaluate_acked, evaluate_step, FactEvidence, SafetyFacts};
 pub use tables::{
     log_ported_items, ported_items, tables, PortedItem, SafetyTables, UPSTREAM_COMMIT,
 };

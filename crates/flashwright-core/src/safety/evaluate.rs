@@ -72,7 +72,24 @@ pub(crate) struct SafetyFacts {
     pub(crate) adb_server_ok: bool,
     pub(crate) partition_bytes: Option<u64>,
     pub(crate) pending_ota: Option<bool>,
+    pub(crate) firmware_sha256: Option<String>,
+    pub(crate) image_sha256: Option<String>,
+    pub(crate) full_ota: bool,
+    pub(crate) patched_sha1: Option<String>,
+    pub(crate) stock_sha1: Option<String>,
+    pub(crate) battery_percent: Option<u32>,
+    pub(crate) host_free_bytes: Option<u64>,
+    pub(crate) device_free_bytes: Option<u64>,
+    pub(crate) driver_ok: bool,
+    pub(crate) evidence: Vec<FactEvidence>,
     pub(crate) checks: LegacyChecks,
+}
+
+/// One phone read that a fact came from. The digest is part of the plan hash.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FactEvidence {
+    pub(crate) source: String,
+    pub(crate) sha256: String,
 }
 
 /// Pass or fail for the gates that are not computed from a phone read.
@@ -82,10 +99,15 @@ pub(crate) struct LegacyChecks {
 }
 
 impl LegacyChecks {
-    pub(crate) fn pass() -> Self {
+    fn none() -> Self {
         Self {
             failing: Vec::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pass() -> Self {
+        Self::none()
     }
 
     #[cfg(test)]
@@ -131,7 +153,17 @@ impl SafetyFacts {
             adb_server_ok: false,
             partition_bytes: None,
             pending_ota: None,
-            checks: LegacyChecks::pass(),
+            firmware_sha256: None,
+            image_sha256: None,
+            full_ota: false,
+            patched_sha1: None,
+            stock_sha1: None,
+            battery_percent: None,
+            host_free_bytes: None,
+            device_free_bytes: None,
+            driver_ok: false,
+            evidence: Vec::new(),
+            checks: LegacyChecks::none(),
         }
     }
 
@@ -169,6 +201,19 @@ impl SafetyFacts {
             adb_server_ok: true,
             partition_bytes: Some(64 * 1024 * 1024),
             pending_ota: Some(false),
+            firmware_sha256: Some("synthetic-sha".into()),
+            image_sha256: Some("synthetic-sha".into()),
+            full_ota: true,
+            patched_sha1: Some("synthetic-sha1".into()),
+            stock_sha1: Some("synthetic-sha1".into()),
+            battery_percent: Some(80),
+            host_free_bytes: Some(8 * 1024 * 1024 * 1024),
+            device_free_bytes: Some(8 * 1024 * 1024 * 1024),
+            driver_ok: true,
+            evidence: vec![FactEvidence {
+                source: "synthetic".into(),
+                sha256: "synthetic-sha".into(),
+            }],
             checks: LegacyChecks::pass(),
         }
     }
@@ -178,7 +223,8 @@ impl SafetyFacts {
 pub fn gate_ids() -> &'static [&'static str] {
     &[
         "G01", "G02", "G03", "G04", "G05", "G06", "G07", "G08", "G09", "G10", "G11", "G12", "G13",
-        "G14", "G15", "G16", "G17", "G18", "G19", "ARB", "G20", "G21", "G22", "SLOT", "OFF",
+        "G14", "G15", "G16", "G17", "G18", "G19", "G20", "G21", "G22", "G23", "G24", "G25", "G26",
+        "G27", "G28",
     ]
 }
 
@@ -215,16 +261,36 @@ pub(crate) fn evaluate_acked(
         .collect()
 }
 
-/// G03, G15, G21, and G22 for one step. A miss blocks that step.
-pub(crate) fn pre_step_blocks(step: &PlanStep, facts: Option<&SafetyFacts>) -> Vec<GateDecision> {
-    ["G03", "G15", "G21", "G22"]
-        .into_iter()
+/// Gates for one write, including reboot, set-active, and a cleanup step.
+///
+/// An empty result means this step is not a write. A blocked entry refuses the write.
+pub(crate) fn evaluate_step(step: &PlanStep, facts: Option<&SafetyFacts>) -> Vec<GateDecision> {
+    let PlanStep::Write(cmd) = step else {
+        return Vec::new();
+    };
+    let mut ids = vec!["G01", "G02", "G21", "G22"];
+    if cmd_is_fastboot(cmd) {
+        ids.push("G03");
+    }
+    if is_image_write(cmd) {
+        ids.push("G15");
+        ids.push("G28");
+    }
+    if is_vbmeta_flash(cmd) {
+        ids.push("G26");
+    }
+    let steps = std::slice::from_ref(step);
+    ids.into_iter()
         .filter_map(|id| {
             let (blocked, reason) = match id {
-                "G03" => g03_step(step, facts),
-                "G15" => g15_step(step, facts),
+                "G01" => g01(facts),
+                "G02" => g02(facts),
+                "G03" => g03(steps, facts),
+                "G15" => g15(steps, facts),
                 "G21" => g21(facts),
                 "G22" => g22(facts),
+                "G26" => g26(steps),
+                "G28" => g28(steps),
                 _ => (false, String::new()),
             };
             if !blocked {
@@ -302,24 +368,43 @@ fn decide(
     rendered: &[String],
 ) -> GateDecision {
     let severity = severity_of(id);
+    if facts.is_some_and(|facts| !facts.checks.allows(id)) {
+        return GateDecision {
+            id: static_id(id),
+            severity,
+            blocked: true,
+            reason: legacy_message(id).to_string(),
+        };
+    }
     let (blocked, reason) = match id {
+        "G01" => g01(facts),
         "G02" => g02(facts),
         "G03" => g03(steps, facts),
         "G04" => g04(facts, tables, image_write),
+        "G05" => g05(facts, image_write),
+        "G06" => g06(steps, facts),
         "G07" => g07(facts, image_write),
         "G08" => g08(facts, image_write),
+        "G09" => g09(steps, facts),
         "G10" => g10(facts, tables, image_write),
+        "G11" => g11(facts, image_write),
+        "G12" => g12(facts, image_write),
+        "G13" => g13(facts, image_write),
         "G14" => g14(backup, steps, image_write),
         "G15" => g15(steps, facts),
         "G16" => g16(rendered, tables),
+        "G17" => g17(facts, image_write),
         "G18" => g18(facts, steps),
         "G19" => g19(facts, tables),
         "G20" => g20(facts, image_write),
         "G21" => g21(facts),
         "G22" => g22(facts),
-        "ARB" => arb(facts, steps, tables),
-        "SLOT" => slot_gate(steps, facts, tables, rendered),
-        "OFF" => off_gate(steps, rendered, tables),
+        "G23" => g23(facts, steps, tables),
+        "G24" => g24(steps, facts, tables, rendered),
+        "G25" => g25(rendered, tables),
+        "G26" => g26(steps),
+        "G27" => g27(rendered, tables),
+        "G28" => g28(steps),
         other => legacy(other, facts, image_write),
     };
     GateDecision {
@@ -335,7 +420,7 @@ fn static_id(id: &str) -> &'static str {
         .iter()
         .copied()
         .find(|known| *known == id)
-        .unwrap_or("OFF")
+        .unwrap_or("G27")
 }
 
 fn severity_of(id: &str) -> Severity {
@@ -371,7 +456,117 @@ fn legacy_message(id: &str) -> &'static str {
         "G20" => "A pending system update may undo root after it installs.",
         "G21" => "Flashwright's copy of platform-tools changed on disk. Re-import it.",
         "G22" => "Restart adb before a write. The server on port 5037 is not the verified adb.",
+        "G23" => "This Tensor phone cannot take that bootloader.",
+        "G24" => "The plan writes a slot other than the inactive slot.",
+        "G25" => "That region is off-limits and cannot be read or written.",
+        "G26" => "vbmeta is read-only.",
+        "G27" => "That write is off-limits.",
+        "G28" => "The image is larger than the catalogue allows.",
         _ => "This check failed.",
+    }
+}
+
+fn g01(facts: Option<&SafetyFacts>) -> (bool, String) {
+    match facts {
+        Some(facts) if facts.tools_verified => (false, String::new()),
+        _ => (true, legacy_message("G01").to_string()),
+    }
+}
+
+fn g05(facts: Option<&SafetyFacts>, image_write: bool) -> (bool, String) {
+    if !image_write {
+        return (false, String::new());
+    }
+    let Some(facts) = facts else {
+        return missing(true, "The firmware SHA-256 was not checked.");
+    };
+    match (&facts.firmware_sha256, &facts.image_sha256) {
+        (Some(firmware), Some(image)) if firmware == image => (false, String::new()),
+        (Some(_), Some(_)) => (true, legacy_message("G05").to_string()),
+        _ => (
+            true,
+            "The firmware SHA-256 was not read from the file.".into(),
+        ),
+    }
+}
+
+fn g06(steps: &[PlanStep], facts: Option<&SafetyFacts>) -> (bool, String) {
+    let ota = steps.iter().any(|step| {
+        matches!(
+            step,
+            PlanStep::Write(WriteCmd::Fastboot(crate::cmd::FastbootWrite::Update { .. }))
+                | PlanStep::Write(WriteCmd::AdbHost(crate::cmd::AdbHostWrite::Sideload { .. }))
+        )
+    });
+    if !ota {
+        return (false, String::new());
+    }
+    if facts.is_some_and(|facts| facts.full_ota) {
+        (false, String::new())
+    } else {
+        (true, legacy_message("G06").to_string())
+    }
+}
+
+fn g09(steps: &[PlanStep], facts: Option<&SafetyFacts>) -> (bool, String) {
+    let patch = steps.iter().any(|step| {
+        matches!(
+            step,
+            PlanStep::Write(WriteCmd::Su(_)) | PlanStep::Write(WriteCmd::AdbShell(_))
+        )
+    });
+    if !patch {
+        return (false, String::new());
+    }
+    match facts {
+        Some(facts) if facts.patched_sha1.is_some() && facts.patched_sha1 == facts.stock_sha1 => {
+            (false, String::new())
+        }
+        _ => (true, legacy_message("G09").to_string()),
+    }
+}
+
+fn g11(facts: Option<&SafetyFacts>, image_write: bool) -> (bool, String) {
+    if !image_write {
+        return (false, String::new());
+    }
+    match facts.and_then(|facts| facts.battery_percent) {
+        Some(level) if level >= 20 => (false, String::new()),
+        Some(_) => (true, legacy_message("G11").to_string()),
+        None => (true, "The battery level was not read.".into()),
+    }
+}
+
+fn g12(facts: Option<&SafetyFacts>, image_write: bool) -> (bool, String) {
+    if !image_write {
+        return (false, String::new());
+    }
+    match facts.and_then(|facts| facts.host_free_bytes) {
+        Some(free) if free >= 512 * 1024 * 1024 => (false, String::new()),
+        Some(_) => (true, legacy_message("G12").to_string()),
+        None => (true, "Free space on the computer was not read.".into()),
+    }
+}
+
+fn g13(facts: Option<&SafetyFacts>, image_write: bool) -> (bool, String) {
+    if !image_write {
+        return (false, String::new());
+    }
+    match facts.and_then(|facts| facts.device_free_bytes) {
+        Some(free) if free >= 512 * 1024 * 1024 => (false, String::new()),
+        Some(_) => (true, legacy_message("G13").to_string()),
+        None => (true, "Free space on the phone was not read.".into()),
+    }
+}
+
+fn g17(facts: Option<&SafetyFacts>, image_write: bool) -> (bool, String) {
+    if !image_write {
+        return (false, String::new());
+    }
+    if facts.is_some_and(|facts| facts.driver_ok) {
+        (false, String::new())
+    } else {
+        (true, legacy_message("G17").to_string())
     }
 }
 
@@ -403,16 +598,6 @@ fn g03(steps: &[PlanStep], facts: Option<&SafetyFacts>) -> (bool, String) {
     }
 }
 
-fn g03_step(step: &PlanStep, facts: Option<&SafetyFacts>) -> (bool, String) {
-    let PlanStep::Write(cmd) = step else {
-        return (false, String::new());
-    };
-    if !cmd_is_fastboot(cmd) {
-        return (false, String::new());
-    }
-    g03(std::slice::from_ref(step), facts)
-}
-
 fn g15(steps: &[PlanStep], facts: Option<&SafetyFacts>) -> (bool, String) {
     let Some(needed) = image_bytes(steps) else {
         return (false, String::new());
@@ -425,10 +610,6 @@ fn g15(steps: &[PlanStep], facts: Option<&SafetyFacts>) -> (bool, String) {
             format!("{} This check was not run.", legacy_message("G15")),
         ),
     }
-}
-
-fn g15_step(step: &PlanStep, facts: Option<&SafetyFacts>) -> (bool, String) {
-    g15(std::slice::from_ref(step), facts)
 }
 
 fn g20(facts: Option<&SafetyFacts>, image_write: bool) -> (bool, String) {
@@ -499,6 +680,9 @@ fn g04(facts: Option<&SafetyFacts>, tables: &SafetyTables, image_write: bool) ->
     let Some(facts) = facts else {
         return missing(image_write, "The phone and the firmware were not compared.");
     };
+    if !image_write {
+        return (false, String::new());
+    }
     let phone = if facts.plan_device.is_empty() {
         facts.device_codename.as_str()
     } else {
@@ -897,16 +1081,20 @@ fn write_slot(cmd: &WriteCmd) -> Option<Slot> {
     }
 }
 
-fn off_gate(steps: &[PlanStep], rendered: &[String], tables: &SafetyTables) -> (bool, String) {
-    for step in steps {
-        if let PlanStep::Write(WriteCmd::Fastboot(crate::cmd::FastbootWrite::Flash {
-            partition: Partition::Vbmeta,
-            ..
-        })) = step
-        {
-            return (true, "vbmeta is read-only.".into());
-        }
-    }
+fn g23(facts: Option<&SafetyFacts>, steps: &[PlanStep], tables: &SafetyTables) -> (bool, String) {
+    arb(facts, steps, tables)
+}
+
+fn g24(
+    steps: &[PlanStep],
+    facts: Option<&SafetyFacts>,
+    tables: &SafetyTables,
+    rendered: &[String],
+) -> (bool, String) {
+    slot_gate(steps, facts, tables, rendered)
+}
+
+fn g25(rendered: &[String], tables: &SafetyTables) -> (bool, String) {
     for token in rendered {
         if let Some(region) = region_hit(token, tables) {
             return (
@@ -914,6 +1102,25 @@ fn off_gate(steps: &[PlanStep], rendered: &[String], tables: &SafetyTables) -> (
                 format!("The {region} region is off-limits and cannot be read or written."),
             );
         }
+    }
+    (false, String::new())
+}
+
+fn g26(steps: &[PlanStep]) -> (bool, String) {
+    if steps.iter().any(|step| {
+        matches!(
+            step,
+            PlanStep::Write(cmd) if is_vbmeta_flash(cmd)
+        )
+    }) {
+        (true, legacy_message("G26").to_string())
+    } else {
+        (false, String::new())
+    }
+}
+
+fn g27(rendered: &[String], tables: &SafetyTables) -> (bool, String) {
+    for token in rendered {
         if token == "erase" {
             return (true, "Erasing a partition is off-limits.".into());
         }
@@ -928,6 +1135,23 @@ fn off_gate(steps: &[PlanStep], rendered: &[String], tables: &SafetyTables) -> (
         }
     }
     (false, String::new())
+}
+
+fn g28(steps: &[PlanStep]) -> (bool, String) {
+    match image_bytes(steps) {
+        Some(size) if size > crate::cmd::MAX_BLOCK_LEN => (true, legacy_message("G28").to_string()),
+        _ => (false, String::new()),
+    }
+}
+
+fn is_vbmeta_flash(cmd: &WriteCmd) -> bool {
+    matches!(
+        cmd,
+        WriteCmd::Fastboot(crate::cmd::FastbootWrite::Flash {
+            partition: Partition::Vbmeta,
+            ..
+        })
+    )
 }
 
 fn region_hit<'a>(token: &str, tables: &'a SafetyTables) -> Option<&'a str> {
@@ -1129,6 +1353,18 @@ mod tests {
     }
 
     #[test]
+    fn every_numbered_gate_can_block() {
+        let backup = verified();
+        let steps = stock_flash();
+        for id in gate_ids() {
+            let mut facts = SafetyFacts::komodo_ready();
+            facts.checks = LegacyChecks::fail(id);
+            assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), id);
+        }
+        assert_eq!(gate_ids().len(), 28);
+    }
+
+    #[test]
     fn image_write_without_facts_blocks_and_prints_nothing_to_run() {
         let lines = preview(&stock_flash(), None, None);
         assert_blocked(&lines, "G01");
@@ -1267,7 +1503,7 @@ mod tests {
             Partition::Bootloader,
             "/var/flashwright/bootloader.img",
         )];
-        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "ARB");
+        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G23");
 
         let facts = SafetyFacts::komodo_ready();
         let steps = vec![flash(
@@ -1275,7 +1511,7 @@ mod tests {
             Partition::InitBoot,
             "/var/flashwright/init_boot.img",
         )];
-        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "SLOT");
+        assert_blocked(&preview(&steps, Some(&facts), Some(&backup)), "G24");
 
         let steps = vec![
             flash(
@@ -1290,7 +1526,7 @@ mod tests {
             ),
         ];
         let lines = preview(&steps, Some(&facts), Some(&backup));
-        assert_blocked(&lines, "SLOT");
+        assert_blocked(&lines, "G24");
         assert!(lines.iter().any(|line| line.contains("both slots")));
     }
 
@@ -1303,13 +1539,13 @@ mod tests {
             Partition::Vbmeta,
             "/var/flashwright/vbmeta.img",
         )];
-        assert_blocked(&preview(&vbmeta, Some(&facts), Some(&backup)), "OFF");
+        assert_blocked(&preview(&vbmeta, Some(&facts), Some(&backup)), "G26");
 
         for region in ["lu0", "fips"] {
             let path = format!("/var/flashwright/{region}/init_boot.img");
             let steps = vec![flash(Slot::B, Partition::InitBoot, &path)];
             let lines = preview(&steps, Some(&facts), Some(&backup));
-            assert_blocked(&lines, "OFF");
+            assert_blocked(&lines, "G25");
             assert!(lines.iter().any(|line| line.contains(region)));
         }
 
@@ -1323,14 +1559,14 @@ mod tests {
         let path = format!("/var/flashwright/{needle}/init_boot.img");
         let steps = vec![flash(Slot::B, Partition::InitBoot, &path)];
         let lines = preview(&steps, Some(&facts), Some(&backup));
-        assert_blocked(&lines, "OFF");
+        assert_blocked(&lines, "G27");
         assert!(lines.iter().any(|line| line.contains("host shell")));
 
-        let (blocked, reason) = off_gate(&[], &["erase".into()], tables());
+        let (blocked, reason) = g27(&["erase".into()], tables());
         assert!(blocked);
         assert!(reason.contains("off-limits"));
 
-        let (blocked, reason) = slot_gate(
+        let (blocked, reason) = g24(
             &[],
             Some(&facts),
             tables(),
@@ -1456,18 +1692,18 @@ mod tests {
             "/var/flashwright/init_boot.img",
         );
         let mut facts = SafetyFacts::komodo_ready();
-        assert!(pre_step_blocks(&step, Some(&facts)).is_empty());
+        assert!(evaluate_step(&step, Some(&facts)).is_empty());
         facts.unlocked = Some(false);
-        assert!(pre_step_blocks(&step, Some(&facts))
+        assert!(evaluate_step(&step, Some(&facts))
             .iter()
             .any(|gate| gate.id == "G03"));
         facts.unlocked = Some(true);
         facts.partition_bytes = Some(10);
-        assert!(pre_step_blocks(&step, Some(&facts))
+        assert!(evaluate_step(&step, Some(&facts))
             .iter()
             .any(|gate| gate.id == "G15"));
         facts.partition_bytes = None;
-        assert!(pre_step_blocks(&step, Some(&facts))
+        assert!(evaluate_step(&step, Some(&facts))
             .iter()
             .any(|gate| gate.id == "G15"));
         let reboot = PlanStep::Write(WriteCmd::AdbHost(AdbHostWrite::Reboot {
@@ -1476,14 +1712,38 @@ mod tests {
         }));
         facts = SafetyFacts::komodo_ready();
         facts.tools_verified = false;
-        assert!(pre_step_blocks(&reboot, Some(&facts))
+        assert!(evaluate_step(&reboot, Some(&facts))
             .iter()
             .any(|gate| gate.id == "G21"));
         facts.tools_verified = true;
         facts.adb_server_ok = false;
-        assert!(pre_step_blocks(&reboot, Some(&facts))
+        assert!(evaluate_step(&reboot, Some(&facts))
             .iter()
             .any(|gate| gate.id == "G22"));
+        let set_active = PlanStep::Write(WriteCmd::Fastboot(FastbootWrite::SetActive {
+            serial: serial(),
+            slot: Slot::B,
+        }));
+        facts = SafetyFacts::komodo_ready();
+        facts.unlocked = Some(false);
+        assert!(evaluate_step(&set_active, Some(&facts))
+            .iter()
+            .any(|gate| gate.id == "G03"));
+        let mut huge = flash(Slot::B, Partition::InitBoot, "/var/flashwright/huge.img");
+        if let PlanStep::Write(WriteCmd::Fastboot(FastbootWrite::Flash { image, .. })) = &mut huge {
+            image.set_size(crate::cmd::MAX_BLOCK_LEN + 1);
+        }
+        assert!(evaluate_step(&huge, Some(&SafetyFacts::komodo_ready()))
+            .iter()
+            .any(|gate| gate.id == "G28"));
+        assert_blocked(
+            &preview(
+                &[huge],
+                Some(&SafetyFacts::komodo_ready()),
+                Some(&verified()),
+            ),
+            "G28",
+        );
     }
 
     #[test]

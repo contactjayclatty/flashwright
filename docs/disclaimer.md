@@ -48,7 +48,8 @@ These rows are the PixelFlasher tables and checks the safety gates use. The lice
 | Bootloader compare | https://github.com/badabing2005/PixelFlasher/blob/081286d6baf8ac969df29e8b0ab3a5b6ae4cfb54/runtime.py — lines 11536–11563 and 11698–11724 — `081286d` | AGPL-3.0-or-later | `flashwright-core` safety gates G18 and G19 | `major.minor-patch` order. A missing or unreadable version on a listed phone asks for an acknowledgement. |
 | Tensor anti-rollback | https://github.com/badabing2005/PixelFlasher/blob/081286d6baf8ac969df29e8b0ab3a5b6ae4cfb54/pf_modules.py — lines 6322–6367 — `081286d` | AGPL-3.0-or-later | `data/tensor_arb.toml` | raven, oriole, and bluejay below API 33. A bootloader write is a block. |
 | Slot rules | https://github.com/badabing2005/PixelFlasher/blob/081286d6baf8ac969df29e8b0ab3a5b6ae4cfb54/pf_modules.py — lines 6283–6293 and 6422 — `081286d` | AGPL-3.0-or-later | `data/slot_rules.toml` | Both slots, and `--slot all`, are a block. A write names the inactive slot. |
-| LU0 and FIPS | Not from PixelFlasher | — | `data/off_limits.toml` | A path segment `lu0` or `fips` is a block. Wiping data, turning verification off, erasing a partition, writing vbmeta, and starting a host shell are also refused. |
+| LU0 and FIPS | Not from PixelFlasher | — | `data/off_limits.toml` | A path segment `lu0` or `fips` is gate G25. Wiping data, turning verification off, erasing a partition, and starting a host shell are also refused. |
+| vbmeta | Not from PixelFlasher | — | `flashwright-core` safety gate G26 | A vbmeta flash is read-only. This is the opposite of PixelFlasher `flash_vbmeta_if_needed`. |
 
 ## Trademark notice
 
