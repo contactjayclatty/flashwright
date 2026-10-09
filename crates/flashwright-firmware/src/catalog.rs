@@ -111,5 +111,8 @@ struct DeviceFile {
 #[derive(Debug, Deserialize)]
 struct DeviceRowFile {
     codename: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    model: Option<String>,
     has_init_boot: bool,
 }
