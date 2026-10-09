@@ -17,7 +17,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 
 use crate::cmd::{DeviceSerial, ReadCmd, WriteCmd};
-use crate::device::{AliasTable, DeviceTable, LockState, Mode, PlatformToolsTransport, Slot};
+use crate::device::{AliasTable, DeviceInfo, DeviceTable, Mode, PlatformToolsTransport, Slot};
+use crate::exe::SharedReadLocks;
 use crate::parse::{self, Verdict};
 use crate::proc::CommandRunner;
 use crate::safety::{self, BackupState, FactoryInitBoot, InitBootRecord, SafetyFacts};
@@ -109,9 +110,7 @@ struct PlanBody<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ProbeSnapshot {
     mode: Mode,
-    slot: Option<Slot>,
-    fingerprint: Option<String>,
-    lock: Option<LockState>,
+    info: Option<DeviceInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -284,10 +283,13 @@ impl<R: CommandRunner> WizardSession<R> {
                 return Err(rejected("The phone changed. Build the plan again."));
             }
         }
-        if !files_match(&files) {
-            self.discard(plan_hash_value);
-            return Err(rejected("An input file changed. Build the plan again."));
-        }
+        let holds = match hold_inputs(&files) {
+            Ok(holds) => holds,
+            Err(()) => {
+                self.discard(plan_hash_value);
+                return Err(rejected("An input file changed. Build the plan again."));
+            }
+        };
         let decisions = safety::evaluate(&steps, self.safety.as_ref(), self.backup.as_ref());
         if decisions.iter().any(|gate| gate.blocked) {
             let reason = decisions
@@ -336,6 +338,7 @@ impl<R: CommandRunner> WizardSession<R> {
                 }
             }
         }
+        drop(holds);
         drop(token);
         self.phase = Phase::Done;
         Ok(RunReport { lines })
@@ -379,16 +382,12 @@ impl<R: CommandRunner> WizardSession<R> {
             .ok_or_else(|| rejected("The phone is not connected."))?;
         let mut snap = ProbeSnapshot {
             mode: entry.mode,
-            slot: None,
-            fingerprint: None,
-            lock: None,
+            info: None,
         };
         let aliases = AliasTable::embedded().map_err(|err| rejected(err.to_string()))?;
         let devices = DeviceTable::embedded().map_err(|err| rejected(err.to_string()))?;
         if let Ok(info) = self.transport.device_info(serial, &aliases, &devices).await {
-            snap.slot = info.active_slot;
-            snap.fingerprint = info.fingerprint;
-            snap.lock = Some(info.lock);
+            snap.info = Some(info);
         }
         Ok(snap)
     }
@@ -427,10 +426,25 @@ fn digest_inputs(steps: &[PlanStep]) -> Vec<InputDigest> {
     files
 }
 
-fn files_match(expected: &[InputDigest]) -> bool {
-    expected
+fn hold_inputs(expected: &[InputDigest]) -> Result<SharedReadLocks, ()> {
+    if expected.iter().any(|file| file.sha256.is_none()) {
+        return Err(());
+    }
+    let paths: Vec<std::path::PathBuf> = expected
         .iter()
-        .all(|file| hash_file(Path::new(&file.path)) == file.sha256)
+        .map(|file| std::path::PathBuf::from(&file.path))
+        .collect();
+    let mut locks = SharedReadLocks::hold(&paths).map_err(|_| ())?;
+    let hashes = locks.hashes().map_err(|_| ())?;
+    if hashes.len() != expected.len() {
+        return Err(());
+    }
+    for (hash, file) in hashes.iter().zip(expected) {
+        if file.sha256.as_deref() != Some(hash.as_str()) {
+            return Err(());
+        }
+    }
+    Ok(locks)
 }
 
 fn hash_file(path: &Path) -> Option<String> {
@@ -700,7 +714,20 @@ mod tests {
         DeviceSerial::try_from("synth-komodo-1").unwrap()
     }
 
-    fn flash_draft(expires: i64) -> PlanDraft {
+    fn flash_image() -> std::path::PathBuf {
+        let image = std::env::temp_dir().join(format!(
+            "fw-init-boot-{}-{}.img",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&image, b"synthetic-image").unwrap();
+        image
+    }
+
+    fn flash_draft(expires: i64, image: &std::path::Path) -> PlanDraft {
         PlanDraft {
             serial: "synth-komodo-1".into(),
             dry_run: false,
@@ -709,7 +736,7 @@ mod tests {
                 serial: komodo_serial(),
                 slot: Slot::B,
                 partition: Partition::InitBoot,
-                image: ImageRef::new(1, "/var/flashwright/init_boot.img", 4096),
+                image: ImageRef::new(1, image.display().to_string(), 4096),
             }))],
         }
     }
@@ -719,7 +746,11 @@ mod tests {
         let _gate = gate().await;
         let runner = Arc::new(ScriptedRunner::new());
         let mut session = open_session(Arc::clone(&runner), 1_000);
-        let preview = session.build_plan(flash_draft(5_000)).await.unwrap();
+        let image = flash_image();
+        let preview = session
+            .build_plan(flash_draft(5_000, &image))
+            .await
+            .unwrap();
         let before = open_run_count();
         let lines = session.dry_run(&preview.plan_hash).unwrap();
         assert!(lines.iter().any(|line| line.starts_with("WOULD BLOCK:")));
@@ -766,7 +797,11 @@ mod tests {
             .unwrap();
         assert_eq!(record.sha256.len(), 64);
         assert_eq!(runner.calls().len(), 2);
-        let preview = session.build_plan(flash_draft(5_000)).await.unwrap();
+        let image = flash_image();
+        let preview = session
+            .build_plan(flash_draft(5_000, &image))
+            .await
+            .unwrap();
         let before = open_run_count();
         let calls = runner.calls().len();
         let lines = session.dry_run(&preview.plan_hash).unwrap();
@@ -778,5 +813,60 @@ mod tests {
         assert_eq!(runner.calls().len(), calls);
         assert_eq!(open_run_count(), before);
         assert_eq!(session.phase(), Phase::Review);
+    }
+
+    #[tokio::test]
+    async fn a_missing_input_file_fails_the_rehash() {
+        let _gate = gate().await;
+        let runner = Arc::new(ScriptedRunner::new());
+        let mut session = open_session(runner, 1_000);
+        let image = flash_image();
+        let preview = session
+            .build_plan(flash_draft(5_000, &image))
+            .await
+            .unwrap();
+        std::fs::remove_file(&image).unwrap();
+        let err = session
+            .confirm_and_run(&preview.plan_hash)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("input file"), "{err}");
+        assert_eq!(session.phase(), Phase::Connect);
+    }
+
+    #[tokio::test]
+    async fn confirm_compares_the_whole_device_info() {
+        let _gate = gate().await;
+        let runner = Arc::new(ScriptedRunner::new());
+        let mut session = open_session(Arc::clone(&runner), 1_000);
+        let props_seen = std::sync::atomic::AtomicUsize::new(0);
+        runner.on_fn(
+            if cfg!(windows) { "adb.exe" } else { "adb" },
+            &["-s", "pixel1", "shell"],
+            move |call, _hit| {
+                let line = call.args.join(" ");
+                if line.contains("getprop") && !line.contains("ro.") {
+                    let seen = props_seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let model = if seen == 0 {
+                        "Pixel 9 Pro XL"
+                    } else {
+                        "Pixel 8"
+                    };
+                    ScriptedResponse::ok(format!(
+                        "[ro.product.device]: [komodo]\n[ro.product.model]: [{model}]\n"
+                    ))
+                } else {
+                    ScriptedResponse::ok("uid=2000(shell)\n")
+                }
+            },
+        );
+        let preview = session.build_plan(draft(false, 5_000)).await.unwrap();
+        let err = session
+            .confirm_and_run(&preview.plan_hash)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("phone changed"), "{err}");
+        assert_eq!(session.phase(), Phase::Connect);
+        assert_eq!(reboot_count(&runner), 0);
     }
 }

@@ -103,6 +103,30 @@ fn arm(
 }
 
 #[tokio::test]
+async fn a_scan_refuses_a_hashed_adb_that_is_not_allow_listed() {
+    let runner = Arc::new(ScriptedRunner::new());
+    runner.on(
+        adb_name(),
+        &["devices", "-l"],
+        ScriptedResponse::ok("pixel1 device\n"),
+    );
+    let dir = std::env::temp_dir().join(format!("flashwright-scan-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let adb_path = dir.join(adb_name());
+    std::fs::write(&adb_path, b"not-on-the-allow-list").unwrap();
+    let transport = PlatformToolsTransport::new(
+        Arc::clone(&runner),
+        adb_path,
+        tool_path(fastboot_name()),
+        TransportConfig::for_tests(),
+    );
+    let err = transport.list().await.unwrap_err();
+    assert!(err.to_string().contains("allow-listed"), "{err}");
+    assert!(runner.calls().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn a_mismatched_write_spawns_nothing() {
     let _gate = test_gate().await;
     let runner = Arc::new(ScriptedRunner::new());

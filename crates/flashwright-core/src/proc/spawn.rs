@@ -6,12 +6,10 @@
 //! Callers pass a [`crate::exe::VerifiedExe`]. The program path is that
 //! value's absolute path.
 
+use crate::exe::VerifiedExe;
 use std::ffi::OsStr;
 #[cfg(all(test, unix))]
 use std::path::Path;
-use std::process::Stdio;
-
-use crate::exe::VerifiedExe;
 
 /// Build a child command. This is the single `Command::new` call site.
 #[allow(clippy::disallowed_methods)]
@@ -60,12 +58,4 @@ mod quote_tests {
             assert_eq!(lines, chunk);
         }
     }
-}
-
-#[allow(dead_code)]
-pub(crate) fn null_stdio(command: &mut tokio::process::Command) {
-    command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null());
 }

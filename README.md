@@ -63,7 +63,7 @@
 
 Safety checks run before a patch or a flash. They cover the phone, the factory image, the security patch, Magisk, the bootloader, and the slot. A dry run prints WOULD RUN or WOULD BLOCK and does not write. Stock init_boot is read, stored with a SHA-256, and compared with the factory image. A mismatch stops the job. The LU0 and FIPS regions are refused. This build uses sample phones and does not write to a device.
 
-Platform-tools are located and version-checked before a scan. Writes stay off until an allow-list entry has per-file hashes and has been device-tested. A confirmed plan is single-use: Flashwright re-checks the phone and the input files, then discards the plan if either has changed.
+Platform-tools are located and version-checked before a scan. Every run, including a scan, compares the tool file with the allow-list hash. A copy, a hard link, or a file that was only hashed is refused, and the tools directory is not the working directory. Writes stay off until an allow-list entry has per-file hashes and has been device-tested. A confirmed plan is single-use: Flashwright re-checks the full device record and the input files, holds those files open until the flash finishes, and discards the plan if the phone or a file has changed.
 
 ## The wizard
 

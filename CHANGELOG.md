@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fastboot `getvar` is parsed from stdout and stderr, and the slot compare is exact.
 - Sideload uses a 900 second quiet window after a progress percent, and a 300 second watchdog before that.
 - `xtask lint-spawn` scans `apps/` as well as the crates, and it rejects an aliased `Command::new` and `#[expect(clippy::disallowed_methods)]` outside the spawn module.
+- Every adb and fastboot run, including a scan, re-checks the file against the allow-list hash. A measured copy, a hard link, or a replaced file is refused. The tools directory is not the working directory.
+- Confirm compares the full device record when the probe succeeds. A missing or changed input file discards the plan. Input files stay open from confirm until the flash finishes.
+- `xtask check` rejects a non-call `Command::new`, an allow or expect that hides a spawn, Win32 process creation, a tokio process command outside the spawn module, and `child_process` in the product UI. It also checks device codenames, the reuse log, private paths, and the devices table.
 
 ### Added
 

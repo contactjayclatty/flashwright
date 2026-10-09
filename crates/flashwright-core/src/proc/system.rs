@@ -13,10 +13,10 @@ use crate::proc::lines::{push_capped, tail_of, LineAssembler};
 use crate::proc::spawn;
 use crate::proc::{CommandRunner, ProcError, ProcessGroup, RunLimits, RunResult, StdStream};
 
-/// Spawns real processes with `tokio::process::Command` and an argument vector.
+/// Spawns real processes from an allow-listed adb or fastboot.
 ///
-/// The executable must be a measured or allow-listed adb or fastboot. The
-/// argument vector is a catalogue command.
+/// The argument vector is a catalogue command. The tools directory is on
+/// `PATH` and is not the working directory.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemRunner;
 
@@ -27,11 +27,7 @@ impl CommandRunner for SystemRunner {
         command: &CatalogueCommand,
         limits: RunLimits,
     ) -> Result<RunResult, ProcError> {
-        if !exe.admits_system_spawn() {
-            return Err(ProcError::Unverified {
-                detail: "only a resolved adb or fastboot may run".into(),
-            });
-        }
+        crate::exe::recheck_allow_list(exe)?;
         let started = Instant::now();
         let mut child_cmd = spawn::command_for(exe);
         let tools_dir = exe
@@ -47,7 +43,7 @@ impl CommandRunner for SystemRunner {
             .env_remove("ANDROID_ADB_SERVER_PORT")
             .env("ANDROID_PRODUCT_OUT", "")
             .env("PATH", path_with_tools(&tools_dir))
-            .current_dir(&tools_dir)
+            .current_dir(std::env::temp_dir())
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -244,9 +240,22 @@ mod runner_tests {
     use std::os::unix::fs::symlink;
     use std::time::{Duration, Instant};
 
+    use std::path::Path;
+
+    use sha2::{Digest, Sha256};
+
     use crate::cmd::{CatalogueCommand, Tool};
-    use crate::exe::{measure_platform_tool, scripted_tool};
+    use crate::exe::{measure_platform_tool, platform_tool, scripted_tool, VerifiedExe};
     use crate::proc::{CommandRunner, RunLimits, SystemRunner};
+
+    fn allow_listed(path: &Path) -> VerifiedExe {
+        let bytes = std::fs::read(path).unwrap();
+        let hash = Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        platform_tool(path, &hash).unwrap()
+    }
 
     fn limits(
         timeout: Duration,
@@ -266,7 +275,7 @@ mod runner_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let echo = dir.join("adb");
         std::fs::copy("/bin/echo", &echo).unwrap();
-        let exe = measure_platform_tool(&echo).unwrap();
+        let exe = allow_listed(&echo);
         let runner = SystemRunner;
         let echoed = runner
             .run(
@@ -280,7 +289,7 @@ mod runner_tests {
 
         let sleep_path = dir.join("fastboot");
         std::fs::copy("/bin/sleep", &sleep_path).unwrap();
-        let sleep_exe = measure_platform_tool(&sleep_path).unwrap();
+        let sleep_exe = allow_listed(&sleep_path);
         let started = Instant::now();
         let timed = runner
             .run(
@@ -317,7 +326,7 @@ mod runner_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let program = dir.join("adb");
         std::fs::copy("/bin/sh", &program).unwrap();
-        let exe = measure_platform_tool(&program).unwrap();
+        let exe = allow_listed(&program);
         let started = Instant::now();
         let result = SystemRunner
             .run(
@@ -362,6 +371,77 @@ mod runner_tests {
         let link = dir.join("adb");
         symlink("/bin/sh", &link).unwrap();
         assert!(measure_platform_tool(&link).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_hashed_copy_is_refused_until_the_allow_list_matches() {
+        let dir = std::env::temp_dir().join(format!("fw-copy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("adb");
+        std::fs::copy("/bin/echo", &program).unwrap();
+        let measured = measure_platform_tool(&program).unwrap();
+        let err = SystemRunner
+            .run(
+                &measured,
+                &CatalogueCommand::for_test(Tool::Adb, vec!["hello".into()]),
+                limits(Duration::from_secs(2), None, None),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("allow-listed"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_hard_link_and_a_replaced_copy_are_refused() {
+        let dir = std::env::temp_dir().join(format!("fw-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("echo-bin");
+        std::fs::copy("/bin/echo", &source).unwrap();
+        let link = dir.join("adb");
+        std::fs::hard_link(&source, &link).unwrap();
+        let err = measure_platform_tool(&link).unwrap_err();
+        assert!(err.to_string().contains("hard link"), "{err}");
+
+        std::fs::remove_file(&link).unwrap();
+        std::fs::copy("/bin/echo", &link).unwrap();
+        let exe = allow_listed(&link);
+        // Keep the measured inode allocated so the replacement cannot reuse it.
+        let held = std::fs::File::open(&link).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::fs::copy("/bin/echo", &link).unwrap();
+        drop(held);
+        let err = SystemRunner
+            .run(
+                &exe,
+                &CatalogueCommand::for_test(Tool::Adb, vec!["hello".into()]),
+                limits(Duration::from_secs(2), None, None),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("copy"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_tools_directory_is_not_the_working_directory() {
+        let dir = std::env::temp_dir().join(format!("fw-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("adb");
+        std::fs::copy("/bin/sh", &program).unwrap();
+        let exe = allow_listed(&program);
+        let result = SystemRunner
+            .run(
+                &exe,
+                &CatalogueCommand::for_test(Tool::Adb, vec!["-c".into(), "pwd".into()]),
+                limits(Duration::from_secs(2), None, None),
+            )
+            .await
+            .unwrap();
+        let cwd = result.stdout_text().trim().to_string();
+        assert_ne!(cwd, dir.to_string_lossy());
+        assert!(!cwd.contains("fw-cwd-"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
