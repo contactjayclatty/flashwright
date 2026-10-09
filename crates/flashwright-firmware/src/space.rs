@@ -8,6 +8,7 @@ use std::path::Path;
 use crate::error::FirmwareError;
 
 const GIB: u64 = 1024 * 1024 * 1024;
+#[cfg(test)]
 const MIB: u64 = 1024 * 1024;
 
 pub fn working_need(inner_zip_bytes: u64, image_bytes: u64) -> u64 {
@@ -43,7 +44,7 @@ fn volume_free(path: &Path) -> Result<u64, FirmwareError> {
     if rc != 0 {
         return Err(FirmwareError::io(std::io::Error::last_os_error()));
     }
-    Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+    Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
 }
 
 #[cfg(windows)]
@@ -60,8 +61,13 @@ fn volume_free(path: &Path) -> Result<u64, FirmwareError> {
     let wide: Vec<u16> = probe.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut free = 0u64;
     unsafe {
-        GetDiskFreeSpaceExW(PCWSTR(wide.as_ptr()), Some(&mut free), None, None)
-            .map_err(|err| FirmwareError::Archive(err.to_string()))?;
+        GetDiskFreeSpaceExW(
+            PCWSTR(wide.as_ptr()),
+            Some(&mut free as *mut u64),
+            None,
+            None,
+        )
+        .map_err(|_| FirmwareError::NoSpace)?;
     }
     Ok(free)
 }

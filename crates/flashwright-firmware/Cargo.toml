@@ -10,7 +10,6 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-flashwright-tools = { path = "../flashwright-tools" }
 payload_dumper = { version = "=0.8.4", default-features = false, features = ["local_zip"] }
 prost = "0.14"
 tokio.workspace = true
