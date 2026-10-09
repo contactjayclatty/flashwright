@@ -1,4 +1,43 @@
-# Gate G19 schema. The upstream minimum-bootloader table was not copied.
-# The meaning of that table is still unverified, so nothing here blocks a flash.
+# Minimum safe bootloader versions. Ported from PixelFlasher constants.py
+# MIN_SAFE_BOOTLOADER_VERSIONS at commit 081286d, lines 135-146.
+# An older bootloader on either slot is a block.
 
-entries = []
+[[entries]]
+codename = "bluejay"
+min = "15.3-13239612"
+
+[[entries]]
+codename = "oriole"
+min = "15.3-13239612"
+
+[[entries]]
+codename = "raven"
+min = "15.3-13239612"
+
+[[entries]]
+codename = "akita"
+min = "15.3-13266201"
+
+[[entries]]
+codename = "shiba"
+min = "15.3-13272266"
+
+[[entries]]
+codename = "husky"
+min = "15.3-13272266"
+
+[[entries]]
+codename = "frankel"
+min = "17.1-15016913"
+
+[[entries]]
+codename = "blazer"
+min = "17.1-15016913"
+
+[[entries]]
+codename = "mustang"
+min = "17.1-15016913"
+
+[[entries]]
+codename = "rango"
+min = "17.1-15016913"

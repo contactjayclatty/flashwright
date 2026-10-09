@@ -4,7 +4,9 @@ Flashwright is AGPL-3.0-or-later. See `LICENSE`.
 
 Portions derived from PixelFlasher, Copyright badabing2005, AGPL-3.0-or-later, https://github.com/badabing2005/PixelFlasher, commit 081286d (`081286d6baf8ac969df29e8b0ab3a5b6ae4cfb54`).
 
-M1 does not copy PixelFlasher source. The behaviour rows, and the items that are not used, are in `docs/disclaimer.md`.
+The safety gates use PixelFlasher's device table, Magisk list, kernel list, bootloader minimums, and slot checks from that commit, translated into the files under `data/` and checked in `flashwright-core`. Each file, line range, and commit is in `docs/disclaimer.md`. The LU0 and FIPS block is Flashwright policy, not a PixelFlasher table.
+
+M1 does not copy PixelFlasher source beyond the behaviour listed in `docs/disclaimer.md`.
 
 The Magisk app patch follows the same PixelFlasher commit. Each reused item is logged in `docs/disclaimer.md`: `pf_modules.py` `patch_magisk_script` (2698–2939), the app-method choice in `patch_boot_img` (4783–4906), `magisk_not_found` (3687–3715), `runtime.py` `extract_magiskboot` (8702–8732), `runtime.py` `sha1` (3198–3211), and the post-patch check in `pf_modules.py` (5020–5119). `extract_sha1`, `compare_sha1`, and `drive_magisk` are not ported. Magisk itself is GPL-3.0 and is not shipped. magiskboot is not bundled.
 

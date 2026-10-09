@@ -1,4 +1,37 @@
-# Gate G10 schema. The upstream known-bad list was not copied.
-# Codes are added only after an independent check. Empty in M1.
+# Known-bad Magisk builds. Ported from PixelFlasher constants.py
+# KNOWN_BAD_MAGISKS at commit 081286d, line 49. A match is label:version_code.
+# version_codes is the numeric half of each pair, for the older reader.
 
-version_codes = []
+version_codes = [25207, 25208, 25209, 25210, 25211, 26001, 26000, 26103]
+
+[[combo]]
+label = "7dbfba76"
+version_code = 25207
+
+[[combo]]
+label = "e5641d5b"
+version_code = 25208
+
+[[combo]]
+label = "2717feac"
+version_code = 25209
+
+[[combo]]
+label = "981ccabb"
+version_code = 25210
+
+[[combo]]
+label = "69529ac5"
+version_code = 25211
+
+[[combo]]
+label = "e2545e57"
+version_code = 26001
+
+[[combo]]
+label = "26.0"
+version_code = 26000
+
+[[combo]]
+label = "a8c4a33e"
+version_code = 26103

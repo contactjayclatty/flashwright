@@ -1,0 +1,8 @@
+# Slot rules. Ported from PixelFlasher pf_modules.py at commit 081286d:
+# both-slots confirmation around lines 6283-6293, and "--slot all" at line 6422.
+# Phase 1 refuses both of those. Writes name one slot, the inactive one.
+
+both_slots = "block"
+slot_all = "block"
+target = "inactive"
+explicit_slot = true
