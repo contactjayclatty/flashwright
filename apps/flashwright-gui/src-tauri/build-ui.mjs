@@ -18,12 +18,25 @@ if (!existsSync(manifest)) {
   process.exit(1);
 }
 
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const result = spawnSync(npm, ["run", mode], {
-  cwd: uiDir,
-  stdio: "inherit",
-  shell: false,
-});
+// Spawn the npm JavaScript entry point. Windows rejects CreateProcess on
+// npm.cmd when shell is left off, and the shell stays off here.
+function runNpm(args) {
+  if (process.platform !== "win32") {
+    return spawnSync("npm", args, { cwd: uiDir, stdio: "inherit", shell: false });
+  }
+  const cli = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  if (!existsSync(cli)) {
+    console.error(`npm-cli.js was not found next to node (${cli})`);
+    process.exit(1);
+  }
+  return spawnSync(process.execPath, [cli, ...args], {
+    cwd: uiDir,
+    stdio: "inherit",
+    shell: false,
+  });
+}
+
+const result = runNpm(["run", mode]);
 
 if (result.error) {
   console.error(result.error);

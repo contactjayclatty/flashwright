@@ -113,14 +113,26 @@ async function assertInside(page) {
   }
 }
 
-const server = spawn("npx", ["vite", "--host", "127.0.0.1", "--port", "1420", "--strictPort"], {
+const viteBin = path.join(uiRoot, "node_modules", "vite", "bin", "vite.js");
+const server = spawn(process.execPath, [viteBin, "--host", "127.0.0.1", "--port", "1420", "--strictPort"], {
   cwd: uiRoot,
   stdio: "inherit",
   shell: false,
 });
+let serverGone = false;
+server.on("error", (error) => {
+  console.error(error);
+  process.exit(1);
+});
+server.on("exit", () => {
+  serverGone = true;
+});
 
 try {
   await ready();
+  if (serverGone) {
+    throw new Error("The dev server exited before the checks started");
+  }
   const browser = await chromium.launch({
     executablePath: chrome,
     headless: true,

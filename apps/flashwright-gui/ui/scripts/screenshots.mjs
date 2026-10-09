@@ -69,7 +69,8 @@ async function assertClean(page) {
   }
 }
 
-const preview = spawn("npx", ["vite", "--host", "127.0.0.1", "--port", "1421", "--strictPort"], {
+const viteBin = path.join(uiRoot, "node_modules", "vite", "bin", "vite.js");
+const preview = spawn(process.execPath, [viteBin, "--host", "127.0.0.1", "--port", "1421", "--strictPort"], {
   cwd: uiRoot,
   stdio: "inherit",
   shell: false,
