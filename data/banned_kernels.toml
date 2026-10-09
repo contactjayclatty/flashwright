@@ -1,0 +1,34 @@
+# Known-bad kernel name fragments.
+# Ported from PixelFlasher constants.py BANNED_KERNELS at commit 081286d, lines 74-101.
+# The upstream list is missing a comma after "-mokee", so those two literals
+# concatenate at runtime. Both names are kept, and the concatenated token is kept.
+
+fragments = [
+    "-AICP",
+    "-arter97",
+    "-blu_spark",
+    "-CAF",
+    "-cm-",
+    "-crDroid",
+    "-crdroid",
+    "-CyanogenMod",
+    "-Deathly",
+    "-EAS-",
+    "-eas-",
+    "-ElementalX",
+    "-Elite",
+    "-franco",
+    "-hadesKernel",
+    "-Lineage-",
+    "-lineage-",
+    "-LineageOS",
+    "-lineageos",
+    "-mokee",
+    "-MoRoKernel",
+    "-mokee-MoRoKernel",
+    "-Noble",
+    "-Optimus",
+    "-SlimRoms",
+    "-Sultan",
+    "-sultan",
+]
