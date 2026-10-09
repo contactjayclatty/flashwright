@@ -54,8 +54,14 @@ jobs:
       - name: Install wizard UI
         working-directory: apps/flashwright-gui/ui
         run: npm ci
+      - name: Install a compiler new enough for the window shell
+        run: rustup toolchain install stable
       - name: Build NSIS installer
         working-directory: apps/flashwright-gui
+        env:
+          # rust-toolchain.toml stays on 1.88 for the device-layer snapshots.
+          # The window shell's Tauri crates need the stable compiler.
+          RUSTUP_TOOLCHAIN: stable
         run: npx tauri build --bundles nsis
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
