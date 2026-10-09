@@ -61,7 +61,7 @@
 
 ## Status
 
-A Pixel factory package or a full OTA package can be opened. Flashwright extracts init_boot, or boot on older phones, and checks the package hash. Safety checks run before a patch or a flash, and again before every write. They cover the phone, the factory image, the security patch, Magisk, the bootloader, and the slot. A dry run prints WOULD RUN or WOULD BLOCK and does not write. Stock init_boot is read, stored with a SHA-256, and compared with the factory image. A mismatch stops the job. The LU0 and FIPS regions are refused.
+A Pixel factory package or a full OTA package can be opened. Flashwright extracts init_boot, or boot on older phones, and checks the published package hash. The security patch is read from the boot image, and the build date from the image when it is present. A value that cannot be read is acknowledged. Safety checks run before a patch or a flash, and again before every write. They cover the phone, the factory image, the security patch, Magisk, the bootloader, and the slot. A dry run prints WOULD RUN or WOULD BLOCK and does not write. Stock init_boot is read, stored with a SHA-256, and compared with the factory image. A mismatch stops the job. The LU0 and FIPS regions are refused.
 
 The Windows 11 wizard walks through connect, choose, firmware, review, and flash. A plan can be confirmed only from the review step, and only once. Platform-tools are not bundled. This build uses sample phones and does not write to a device.
 

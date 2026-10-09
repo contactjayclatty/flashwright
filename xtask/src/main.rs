@@ -56,6 +56,7 @@ fn check(root: &Path) -> Result<(), String> {
         return Err("LICENSE is missing the GNU AGPL heading".into());
     }
     check_update_metadata(root)?;
+    check_proto_bindings(root)?;
     Ok(())
 }
 
@@ -447,6 +448,31 @@ fn check_update_metadata(root: &Path) -> Result<(), String> {
     if !root.join("third_party/aosp/avb/NOTICE").is_file() {
         return Err("AOSP avb NOTICE is missing".into());
     }
+    Ok(())
+}
+
+fn check_proto_bindings(root: &Path) -> Result<(), String> {
+    let proto = root.join("third_party/aosp/update_engine/update_metadata.proto");
+    let out = std::env::temp_dir().join(format!("fw-proto-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&out);
+    fs::create_dir_all(&out).map_err(|err| err.to_string())?;
+    prost_build::Config::new()
+        .out_dir(&out)
+        .compile_protos(&[proto.as_path()], &[proto.parent().unwrap()])
+        .map_err(|err| {
+            format!("protoc is required to regenerate update_metadata bindings: {err}")
+        })?;
+    let generated_path = out.join("chromeos_update_engine.rs");
+    let generated = fs::read(&generated_path).map_err(|err| err.to_string())?;
+    let committed = fs::read(root.join("crates/flashwright-firmware/src/proto_gen.rs"))
+        .map_err(|err| err.to_string())?;
+    if generated != committed {
+        return Err(format!(
+            "crates/flashwright-firmware/src/proto_gen.rs does not match update_metadata.proto ({})",
+            generated_path.display()
+        ));
+    }
+    let _ = fs::remove_dir_all(&out);
     Ok(())
 }
 

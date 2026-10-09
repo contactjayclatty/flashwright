@@ -34,7 +34,6 @@ Versions are the ones resolved in `Cargo.lock` on 9 Oct 2026.
 | payload_dumper | 0.8.4 | Apache-2.0 |
 | prost | 0.14.4 | Apache-2.0 |
 | prost-build | 0.14.4 | Apache-2.0 |
-| protoc-bin-vendored | 3.3.0 | Apache-2.0 (bundled `protoc` is BSD-3-Clause) |
 
 `zip` is built with `deflate-flate2-zlib-rs` only.
 

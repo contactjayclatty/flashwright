@@ -9,6 +9,7 @@ mod catalog;
 mod check;
 mod error;
 mod factory;
+mod facts;
 mod hashutil;
 mod metadata;
 mod open;
@@ -22,6 +23,8 @@ mod ziputil;
 #[cfg(test)]
 mod tests;
 
+pub use check::GateAck;
 pub use error::FirmwareError;
+pub use facts::DeviceFacts;
 pub use open::{extraction_workers, open_package, OpenRequest, OpenedPackage, PackageKind};
 pub use select::StockPartition;

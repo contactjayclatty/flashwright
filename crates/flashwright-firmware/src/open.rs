@@ -2,17 +2,22 @@
 // Copyright (C) 2026 Clatty Works
 
 //! Open a factory zip or a full A/B OTA zip and extract init_boot or boot.
-//! This writes only into the caller's output directory. It does not talk to a phone.
+//! The package `File` is the only handle: hashing and extraction never open
+//! the path again. This writes only into the caller's output directory.
 
-use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::io::{Seek, SeekFrom};
+use std::path::PathBuf;
+
+use zip::ZipArchive;
 
 use crate::catalog::{AliasTable, DeviceTable};
-use crate::check::{self, MAX_IMAGE};
+use crate::check::{self, GateAck, MAX_IMAGE, MAX_METADATA};
 use crate::error::FirmwareError;
-use crate::factory;
-use crate::hashutil::hex_encode;
-use crate::metadata;
-use crate::payload;
+use crate::facts::DeviceFacts;
+use crate::hashutil::{self, hex_encode};
+use crate::metadata::{self, PackageMeta};
+use crate::payload::{self, PayloadView};
 use crate::select::{self, StockPartition};
 use crate::space::{self, working_need};
 use crate::ziputil::{self, ListedEntry};
@@ -37,15 +42,24 @@ pub struct OpenedPackage {
     pub fingerprint: Option<String>,
     pub post_timestamp: Option<u64>,
     pub post_build: Option<String>,
+    /// `YYYY-MM` from the boot header `os_patch_level`.
+    pub image_security_patch: Option<String>,
+    /// `ro.build.date.utc` from the image `build.prop`, when that file was present.
+    pub image_build_date_utc: Option<u64>,
+    /// Gates whose image value could not be read. An acknowledgement is not a pass.
+    pub acks: Vec<GateAck>,
 }
 
 pub struct OpenRequest {
-    pub path: PathBuf,
+    /// Already open. The path is not opened again.
+    pub package: File,
+    /// File name only, used for the codename and the checksum fragment.
+    pub file_name: String,
     pub output_dir: PathBuf,
-    pub published_sha256: Option<String>,
-    pub expected_codename: Option<String>,
-    pub device_build_timestamp: Option<u64>,
-    pub device_security_patch: Option<String>,
+    /// Google's published package SHA-256. Empty is refused.
+    pub published_sha256: String,
+    /// Codename, build date, and security patch taken from the phone.
+    pub device: DeviceFacts,
     pub on_hash_progress: Option<Box<dyn FnMut(u64) + Send>>,
 }
 
@@ -57,52 +71,57 @@ pub fn extraction_workers() -> usize {
         .min(4)
 }
 
-pub async fn open_package(mut request: OpenRequest) -> Result<OpenedPackage, FirmwareError> {
-    check::extension_ok(&request.path)?;
-    let path_for_hash = request.path.clone();
+pub async fn open_package(request: OpenRequest) -> Result<OpenedPackage, FirmwareError> {
+    tokio::task::spawn_blocking(move || open_package_sync(request))
+        .await
+        .map_err(|_| FirmwareError::Archive("a firmware task stopped".into()))?
+}
+
+fn open_package_sync(mut request: OpenRequest) -> Result<OpenedPackage, FirmwareError> {
+    check::extension_ok(&request.file_name)?;
     let mut progress = request.on_hash_progress.take();
-    let package_sha256 =
-        tokio::task::spawn_blocking(move || check::hash_with(&path_for_hash, &mut progress))
-            .await
-            .map_err(|_| FirmwareError::Archive("a firmware task stopped".into()))??;
-    check::filename_fragment_ok(&request.path, &package_sha256)?;
-    check::published_ok(request.published_sha256.as_deref(), &package_sha256)?;
-    check::reject_region(&check::file_label(&request.path))?;
-    let filename_codename = check::codename_from_filename(&request.path)?;
+    let mut package = request.package;
+    let package_sha256 = match progress.as_mut() {
+        Some(callback) => hashutil::sha256_reader(&mut package, Some(callback.as_mut()))?,
+        None => hashutil::sha256_reader(&mut package, None)?,
+    };
+    package
+        .seek(SeekFrom::Start(0))
+        .map_err(FirmwareError::io)?;
+    check::filename_fragment_ok(&request.file_name, &package_sha256)?;
+    check::published_ok(Some(request.published_sha256.as_str()), &package_sha256)?;
+    check::reject_region(&request.file_name)?;
+    let filename_codename = check::codename_from_filename(&request.file_name)?;
     check::reject_region(&filename_codename)?;
 
-    let entries = ziputil::list_entries(&request.path)?;
+    let mut archive = ZipArchive::new(package).map_err(ziputil::map_zip)?;
+    let entries = ziputil::list_archive(&mut archive)?;
     let kind = classify(&entries)?;
     let opened = match kind {
-        PackageKind::Ota => extract_ota(&request, &filename_codename).await?,
+        PackageKind::Ota => extract_ota(
+            archive,
+            &entries,
+            &request.output_dir,
+            &filename_codename,
+            &request.device,
+        )?,
         PackageKind::Factory => {
-            let path = request.path.clone();
-            let output = request.output_dir.clone();
-            let expected = request.expected_codename.clone();
-            let timestamp = request.device_build_timestamp;
-            let patch = request.device_security_patch.clone();
-            let filename_codename = filename_codename.clone();
-            tokio::task::spawn_blocking(move || {
-                let image = factory::extract_factory(
-                    &path,
-                    &output,
-                    &filename_codename,
-                    expected.as_deref(),
-                    timestamp,
-                    patch.as_deref(),
-                )?;
-                Ok(Extracted {
-                    codename: image.codename,
-                    partition: image.partition,
-                    image_path: image.image_path,
-                    checked: image.checked,
-                    payload_hash: None,
-                    post_timestamp: image.post_timestamp,
-                    post_build: image.post_build,
-                })
-            })
-            .await
-            .map_err(|_| FirmwareError::Archive("a firmware task stopped".into()))??
+            let image = crate::factory::extract_factory(
+                archive,
+                &entries,
+                &request.output_dir,
+                &filename_codename,
+                &request.device,
+            )?;
+            Extracted {
+                codename: image.codename,
+                partition: image.partition,
+                image_path: image.image_path,
+                checked: image.checked,
+                payload_hash: None,
+                post_timestamp: image.post_timestamp,
+                post_build: image.post_build,
+            }
         }
     };
     Ok(OpenedPackage {
@@ -118,6 +137,9 @@ pub async fn open_package(mut request: OpenRequest) -> Result<OpenedPackage, Fir
         fingerprint: opened.checked.fingerprint,
         post_timestamp: opened.post_timestamp,
         post_build: opened.post_build,
+        image_security_patch: opened.checked.image_security_patch,
+        image_build_date_utc: opened.checked.image_build_date_utc,
+        acks: opened.checked.acks,
     })
 }
 
@@ -153,17 +175,19 @@ fn classify(entries: &[ListedEntry]) -> Result<PackageKind, FirmwareError> {
     }
 }
 
-async fn extract_ota(
-    request: &OpenRequest,
+fn extract_ota(
+    mut archive: ZipArchive<File>,
+    entries: &[ListedEntry],
+    output_dir: &std::path::Path,
     filename_codename: &str,
+    device: &DeviceFacts,
 ) -> Result<Extracted, FirmwareError> {
     let (aliases, devices) = tables()?;
-    let entries = ziputil::list_entries(&request.path)?;
     let meta_entry = entries
         .iter()
         .find(|entry| is_metadata(&entry.name))
         .ok_or(FirmwareError::NotFullOta)?;
-    let meta_text = read_entry_text(&request.path, meta_entry)?;
+    let meta_text = read_entry_text(&mut archive, meta_entry)?;
     check::reject_region(&meta_text)?;
     let meta = metadata::parse_metadata(&meta_text);
     check::full_ab_ota(&meta)?;
@@ -172,47 +196,41 @@ async fn extract_ota(
         .as_deref()
         .map(metadata::board_names)
         .unwrap_or_default();
-    let codename = check::agree_codename(
-        &aliases,
-        filename_codename,
-        &stated,
-        request.expected_codename.as_deref(),
-    )?;
+    let codename = check::agree_codename(&aliases, filename_codename, &stated, &device.codename)?;
     check::reject_region(&codename)?;
-    check::downgrade_ok(
-        &meta,
-        request.device_build_timestamp,
-        request.device_security_patch.as_deref(),
-    )?;
 
-    let payload_entry = payload::payload_entry(&entries).ok_or(FirmwareError::NotFullOta)?;
-    let offset = payload::payload_offset(&request.path, payload_entry)?;
-    let manifest = payload::read_manifest(&request.path, offset)?;
-    let names = payload::partition_names(&manifest);
+    let payload_entry = payload::payload_entry(entries).ok_or(FirmwareError::NotFullOta)?;
+    let header_start = payload_entry.header_start;
+    let data_start = payload_entry.data_start;
+    let mut package = archive.into_inner();
+    let offset = match data_start {
+        Some(start) => start,
+        None => ziputil::stored_data_range(&mut package, header_start)?.0,
+    };
+    let view = payload::read_manifest(&mut package, offset)?;
+    let names = payload::partition_names(&view.manifest);
     let partition = select::select_partition(&names, devices.has_init_boot(&codename))?;
-    let record = payload::partition_record(&manifest, partition.as_str())?;
+    let record = payload::partition_record(&view.manifest, partition.as_str())?;
     if record.size > MAX_IMAGE {
         return Err(FirmwareError::Archive(
             "the image is larger than Flashwright will extract".into(),
         ));
     }
-    std::fs::create_dir_all(&request.output_dir).map_err(FirmwareError::io)?;
-    space::ensure_free_space(&request.output_dir, working_need(0, record.size))?;
-    let image_path = request.output_dir.join(partition.file_name());
-    payload::extract_partition(&request.path, partition.as_str(), &image_path).await?;
-    let checked = match check::check_extracted_image(
-        &image_path,
-        partition,
-        &meta,
-        Some(&record.hash),
-        Some(record.size),
-    ) {
-        Ok(checked) => checked,
-        Err(err) => {
-            let _ = std::fs::remove_file(&image_path);
-            return Err(err);
-        }
-    };
+    std::fs::create_dir_all(output_dir).map_err(FirmwareError::io)?;
+    space::ensure_free_space(output_dir, working_need(0, record.size))?;
+    let image_path = output_dir.join(partition.file_name());
+    let checked = write_and_check(
+        &mut package,
+        &view,
+        &ImageWrite {
+            partition,
+            image_path: &image_path,
+            meta: &meta,
+            expected_hash: &record.hash,
+            expected_size: record.size,
+            device,
+        },
+    )?;
     Ok(Extracted {
         codename,
         partition,
@@ -224,22 +242,65 @@ async fn extract_ota(
     })
 }
 
+struct ImageWrite<'a> {
+    partition: StockPartition,
+    image_path: &'a std::path::Path,
+    meta: &'a PackageMeta,
+    expected_hash: &'a [u8],
+    expected_size: u64,
+    device: &'a DeviceFacts,
+}
+
+fn write_and_check(
+    package: &mut File,
+    view: &PayloadView,
+    job: &ImageWrite<'_>,
+) -> Result<crate::check::ImageCheck, FirmwareError> {
+    let mut output = ziputil::create_output(job.image_path)?;
+    let result = (|| {
+        payload::extract_replace(package, view, job.partition.as_str(), &mut output)?;
+        output.seek(SeekFrom::Start(0)).map_err(FirmwareError::io)?;
+        check::check_image_file(
+            &mut output,
+            job.partition,
+            job.meta,
+            Some(job.expected_hash),
+            Some(job.expected_size),
+            job.device,
+        )
+    })();
+    match result {
+        Ok(checked) => Ok(checked),
+        Err(err) => {
+            drop(output);
+            let _ = std::fs::remove_file(job.image_path);
+            Err(err)
+        }
+    }
+}
+
 fn is_metadata(name: &str) -> bool {
     name == "META-INF/com/android/metadata" || name.ends_with("/META-INF/com/android/metadata")
 }
 
-fn read_entry_text(path: &Path, entry: &ListedEntry) -> Result<String, FirmwareError> {
-    const CAP: u64 = 1024 * 1024;
-    if entry.size > CAP {
+fn read_entry_text(
+    archive: &mut ZipArchive<File>,
+    entry: &ListedEntry,
+) -> Result<String, FirmwareError> {
+    if entry.size > MAX_METADATA {
         return Err(FirmwareError::Archive(
             "a metadata entry is too large".into(),
         ));
     }
-    let mut archive = ziputil::open_zip(path)?;
     let mut file = archive.by_index(entry.index).map_err(ziputil::map_zip)?;
-    let mut text = String::new();
-    std::io::Read::read_to_string(&mut file, &mut text).map_err(ziputil::map_read)?;
-    Ok(text)
+    let bytes = ziputil::read_limited(
+        &mut file,
+        entry.size,
+        MAX_METADATA,
+        "a metadata entry is too large",
+    )?;
+    String::from_utf8(bytes)
+        .map_err(|_| FirmwareError::Archive("a metadata entry could not be read".into()))
 }
 
 fn tables() -> Result<(AliasTable, DeviceTable), FirmwareError> {

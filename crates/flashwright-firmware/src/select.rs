@@ -49,15 +49,7 @@ pub fn select_partition(
                 Err(FirmwareError::NoBootImage)
             }
         }
-        None => {
-            if has_init {
-                Ok(StockPartition::InitBoot)
-            } else if has_boot {
-                Ok(StockPartition::Boot)
-            } else {
-                Err(FirmwareError::NoBootImage)
-            }
-        }
+        None => Err(FirmwareError::UnknownDevice),
     }
 }
 
@@ -94,18 +86,15 @@ mod tests {
     }
 
     #[test]
-    fn unknown_device_prefers_init_boot() {
-        assert_eq!(
-            select_partition(&names(&["boot", "init_boot"]), None).unwrap(),
-            StockPartition::InitBoot
-        );
-        assert_eq!(
-            select_partition(&names(&["boot"]), None).unwrap(),
-            StockPartition::Boot
-        );
+    fn unknown_device_is_blocked() {
         assert!(matches!(
-            select_partition(&names(&["vbmeta"]), None),
-            Err(FirmwareError::NoBootImage)
+            select_partition(&names(&["boot", "init_boot"]), None),
+            Err(FirmwareError::UnknownDevice)
         ));
+        assert!(matches!(
+            select_partition(&names(&["boot"]), None),
+            Err(FirmwareError::UnknownDevice)
+        ));
+        assert!(FirmwareError::UnknownDevice.to_string().contains("G24"));
     }
 }

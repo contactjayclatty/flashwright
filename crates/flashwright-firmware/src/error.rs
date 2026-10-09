@@ -31,14 +31,20 @@ pub enum FirmwareError {
     #[error("G06: a factory package needs exactly one image zip")]
     FactoryLayout,
 
-    #[error("G07: the firmware is older than the device")]
+    #[error("G07: the firmware security patch is older than the device")]
     Downgrade,
 
-    #[error("G08: the image security patch does not match the package")]
+    #[error("G08: the firmware build date is older than the device")]
+    OlderBuild,
+
+    #[error("the image security patch does not match the package")]
     SecurityPatchMismatch,
 
-    #[error("G08: the image fingerprint does not match the package")]
+    #[error("the image fingerprint does not match the package")]
     FingerprintMismatch,
+
+    #[error("G24: the codename is not in the device table")]
+    UnknownDevice,
 
     #[error("G12: not enough free space on the working volume")]
     NoSpace,

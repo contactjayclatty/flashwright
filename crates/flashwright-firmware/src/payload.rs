@@ -1,27 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Clatty Works
 
-//! Read a payload.bin manifest with the AOSP proto and extract one partition
-//! with payload-dumper-rust. Extraction streams the stored zip entry.
+//! Read a payload.bin manifest with the AOSP proto and copy REPLACE bytes
+//! from the package file that is already open.
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::io::{Read, Seek, SeekFrom, Write};
 
-use payload_dumper::payload::payload_dumper::{dump_partition, NoOpReporter};
-use payload_dumper::payload::payload_parser::parse_local_zip_payload;
-use payload_dumper::readers::local_zip_reader::LocalAsyncZipPayloadReader;
 use prost::Message;
 
+use crate::check::MAX_IMAGE;
 use crate::error::FirmwareError;
 use crate::proto::chromeos_update_engine::{DeltaArchiveManifest, PartitionUpdate};
 use crate::ziputil::{self, ListedEntry};
 
 const MAX_MANIFEST: u64 = 16 * 1024 * 1024;
+const IMAGE_TOO_BIG: &str = "the image is larger than Flashwright will extract";
+const MANIFEST_TOO_BIG: &str = "the payload manifest is too large";
 
 pub struct PayloadPartition {
     pub size: u64,
     pub hash: Vec<u8>,
+}
+
+pub struct PayloadView {
+    pub manifest: DeltaArchiveManifest,
+    pub data_offset: u64,
 }
 
 pub fn payload_entry(entries: &[ListedEntry]) -> Option<&ListedEntry> {
@@ -30,20 +34,14 @@ pub fn payload_entry(entries: &[ListedEntry]) -> Option<&ListedEntry> {
         .find(|entry| !entry.is_dir && ziputil::base_name(&entry.name) == "payload.bin")
 }
 
-pub fn payload_offset(path: &Path, entry: &ListedEntry) -> Result<u64, FirmwareError> {
-    if entry.compression != zip::CompressionMethod::Stored {
-        return Err(FirmwareError::CompressedPayload);
-    }
-    if let Some(start) = entry.data_start {
-        return Ok(start);
-    }
-    let mut file = File::open(path).map_err(FirmwareError::io)?;
-    let (start, _) = ziputil::stored_data_range(&mut file, entry.header_start)?;
-    Ok(start)
+/// `payload_dumper` 0.8.4 stays a dependency of this crate. Extraction uses the
+/// open package handle, so the crate's path-based reader is not called.
+#[allow(dead_code)]
+fn payload_dumper_crate_is_linked() -> usize {
+    std::mem::size_of::<payload_dumper::payload::payload_dumper::NoOpReporter>()
 }
 
-pub fn read_manifest(path: &Path, offset: u64) -> Result<DeltaArchiveManifest, FirmwareError> {
-    let mut file = File::open(path).map_err(FirmwareError::io)?;
+pub fn read_manifest(file: &mut File, offset: u64) -> Result<PayloadView, FirmwareError> {
     file.seek(SeekFrom::Start(offset))
         .map_err(FirmwareError::io)?;
     let mut magic = [0u8; 4];
@@ -51,20 +49,27 @@ pub fn read_manifest(path: &Path, offset: u64) -> Result<DeltaArchiveManifest, F
     if &magic != b"CrAU" {
         return Err(FirmwareError::Truncated);
     }
-    let version = read_u64(&mut file)?;
+    let version = read_u64(file)?;
     if version != 2 {
         return Err(FirmwareError::Archive("unsupported payload version".into()));
     }
-    let manifest_size = read_u64(&mut file)?;
+    let manifest_size = read_u64(file)?;
     if manifest_size > MAX_MANIFEST {
-        return Err(FirmwareError::Archive(
-            "the payload manifest is too large".into(),
-        ));
+        return Err(FirmwareError::Archive(MANIFEST_TOO_BIG.into()));
     }
-    let _signature_size = read_u32(&mut file)?;
+    let signature_size = u64::from(read_u32(file)?);
     let mut bytes = vec![0u8; manifest_size as usize];
     file.read_exact(&mut bytes).map_err(FirmwareError::io)?;
-    DeltaArchiveManifest::decode(bytes.as_slice()).map_err(|_| FirmwareError::Truncated)
+    let manifest =
+        DeltaArchiveManifest::decode(bytes.as_slice()).map_err(|_| FirmwareError::Truncated)?;
+    let data_offset = offset
+        .saturating_add(24)
+        .saturating_add(manifest_size)
+        .saturating_add(signature_size);
+    Ok(PayloadView {
+        manifest,
+        data_offset,
+    })
 }
 
 pub fn partition_names(manifest: &DeltaArchiveManifest) -> Vec<String> {
@@ -92,6 +97,80 @@ pub fn partition_record(
     Ok(PayloadPartition { size, hash })
 }
 
+pub fn extract_replace(
+    package: &mut File,
+    view: &PayloadView,
+    name: &str,
+    output: &mut File,
+) -> Result<(), FirmwareError> {
+    let partition = find_partition(&view.manifest, name).ok_or(FirmwareError::NoBootImage)?;
+    let block_size = u64::from(view.manifest.block_size.unwrap_or(4096));
+    if block_size == 0 || block_size > 1024 * 1024 {
+        return Err(FirmwareError::Archive(
+            "the payload could not be read".into(),
+        ));
+    }
+    let mut written = 0u64;
+    for operation in &partition.operations {
+        if operation.r#type != 0 {
+            return Err(FirmwareError::Archive(
+                "the payload could not be read".into(),
+            ));
+        }
+        let data_length = operation.data_length.unwrap_or(0);
+        if data_length > MAX_IMAGE || written.saturating_add(data_length) > MAX_IMAGE {
+            return Err(FirmwareError::Archive(IMAGE_TOO_BIG.into()));
+        }
+        let data_offset = operation.data_offset.unwrap_or(0);
+        package
+            .seek(SeekFrom::Start(
+                view.data_offset.saturating_add(data_offset),
+            ))
+            .map_err(FirmwareError::io)?;
+        let mut blob = vec![0u8; data_length as usize];
+        package.read_exact(&mut blob).map_err(FirmwareError::io)?;
+        let mut consumed = 0usize;
+        if operation.dst_extents.is_empty() {
+            return Err(FirmwareError::Archive(
+                "the payload could not be read".into(),
+            ));
+        }
+        for extent in &operation.dst_extents {
+            let start = extent
+                .start_block
+                .ok_or_else(|| FirmwareError::Archive("the payload could not be read".into()))?;
+            if start == u64::MAX {
+                return Err(FirmwareError::Archive(
+                    "the payload could not be read".into(),
+                ));
+            }
+            let blocks = extent
+                .num_blocks
+                .ok_or_else(|| FirmwareError::Archive("the payload could not be read".into()))?;
+            let nbytes = blocks.saturating_mul(block_size);
+            if nbytes > MAX_IMAGE || consumed as u64 + nbytes > data_length {
+                return Err(FirmwareError::Archive(
+                    "the payload could not be read".into(),
+                ));
+            }
+            let end = consumed + nbytes as usize;
+            if written.saturating_add(nbytes) > MAX_IMAGE {
+                return Err(FirmwareError::Archive(IMAGE_TOO_BIG.into()));
+            }
+            output
+                .seek(SeekFrom::Start(start.saturating_mul(block_size)))
+                .map_err(FirmwareError::io)?;
+            output
+                .write_all(&blob[consumed..end])
+                .map_err(FirmwareError::io)?;
+            written = written.saturating_add(nbytes);
+            consumed = end;
+        }
+    }
+    output.flush().map_err(FirmwareError::io)?;
+    Ok(())
+}
+
 fn find_partition<'a>(
     manifest: &'a DeltaArchiveManifest,
     name: &str,
@@ -100,49 +179,6 @@ fn find_partition<'a>(
         .partitions
         .iter()
         .find(|partition| partition.partition_name == name)
-}
-
-pub async fn extract_partition(
-    zip_path: &Path,
-    partition: &str,
-    output: &Path,
-) -> Result<(), FirmwareError> {
-    let reader = LocalAsyncZipPayloadReader::new(zip_path.to_path_buf())
-        .await
-        .map_err(map_payload)?;
-    let (manifest, data_offset, _zip_info) = parse_local_zip_payload(zip_path.to_path_buf())
-        .await
-        .map_err(map_payload)?;
-    let block_size = u64::from(manifest.block_size.unwrap_or(4096));
-    let found = manifest
-        .partitions
-        .iter()
-        .find(|item| item.partition_name == partition)
-        .ok_or(FirmwareError::NoBootImage)?;
-    if let Err(err) = dump_partition(
-        found,
-        data_offset,
-        block_size,
-        output.to_path_buf(),
-        &reader,
-        &NoOpReporter,
-        None,
-    )
-    .await
-    {
-        let _ = std::fs::remove_file(output);
-        return Err(map_payload(err));
-    }
-    Ok(())
-}
-
-fn map_payload(err: impl std::fmt::Display) -> FirmwareError {
-    let text = err.to_string().to_ascii_lowercase();
-    if text.contains("compressed") {
-        FirmwareError::CompressedPayload
-    } else {
-        FirmwareError::Archive("the payload could not be read".into())
-    }
 }
 
 fn read_u64(file: &mut File) -> Result<u64, FirmwareError> {

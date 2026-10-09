@@ -1,22 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Clatty Works
 
-//! Open a Pixel factory zip. A stored inner image zip is read as a sub-range.
-//! A deflated inner image zip is streamed to the work directory in 64 KiB
-//! buffers and removed afterwards.
+//! Open a Pixel factory zip. A stored inner image zip is read as a sub-range
+//! of the package file already open. A deflated inner image zip is streamed
+//! to the work directory and removed afterwards. The codename check runs
+//! before that copy.
 
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use zip::CompressionMethod;
+use zip::ZipArchive;
 
 use crate::catalog::{AliasTable, DeviceTable};
-use crate::check::{self, ImageCheck, MAX_IMAGE, MAX_INNER_ZIP};
+use crate::check::{self, ImageCheck, MAX_IMAGE, MAX_INNER_ZIP, MAX_METADATA};
 use crate::error::FirmwareError;
+use crate::facts::DeviceFacts;
 use crate::metadata::{self, PackageMeta};
 use crate::select::{self, StockPartition};
 use crate::space::{self, working_need};
 use crate::ziputil::{self, FileWindow, ListedEntry};
+
+const META_TOO_BIG: &str = "a metadata entry is too large";
+const IMAGE_TOO_BIG: &str = "the image is larger than Flashwright will extract";
+const INNER_TOO_BIG: &str = "the image zip is larger than Flashwright will unpack";
 
 pub struct FactoryImage {
     pub codename: String,
@@ -28,15 +36,13 @@ pub struct FactoryImage {
 }
 
 pub fn extract_factory(
-    path: &Path,
+    mut archive: ZipArchive<File>,
+    entries: &[ListedEntry],
     output_dir: &Path,
     filename_codename: &str,
-    expected_codename: Option<&str>,
-    device_timestamp: Option<u64>,
-    device_security_patch: Option<&str>,
+    device: &DeviceFacts,
 ) -> Result<FactoryImage, FirmwareError> {
     let (aliases, devices) = tables()?;
-    let entries = ziputil::list_entries(path)?;
     let images: Vec<&ListedEntry> = entries
         .iter()
         .filter(|entry| ziputil::is_image_zip(&entry.name))
@@ -47,35 +53,39 @@ pub fn extract_factory(
     }
     let inner = images[0];
     if inner.size > MAX_INNER_ZIP {
-        return Err(FirmwareError::Archive(
-            "the image zip is larger than Flashwright will unpack".into(),
-        ));
+        return Err(FirmwareError::Archive(INNER_TOO_BIG.into()));
     }
-    let outer_meta = read_named_text(path, &entries, |name| {
+    let outer_meta = text_named(&mut archive, entries, |name| {
         ziputil::base_name(name) == "android-info.txt"
     })?;
+    check::filename_matches_device(&aliases, filename_codename, &device.codename)?;
+    if let Some(text) = outer_meta.as_deref() {
+        let meta = metadata::parse_metadata(text);
+        if let Some(board) = meta.board.as_deref() {
+            let stated = metadata::board_names(board);
+            check::agree_codename(&aliases, filename_codename, &stated, &device.codename)?;
+        }
+    }
 
     if inner.compression == CompressionMethod::Stored {
-        let start = match inner.data_start {
+        let header_start = inner.header_start;
+        let data_start = inner.data_start;
+        let compressed = inner.compressed_size;
+        let mut file = archive.into_inner();
+        let start = match data_start {
             Some(start) => start,
-            None => {
-                let mut file = File::open(path).map_err(FirmwareError::io)?;
-                ziputil::stored_data_range(&mut file, inner.header_start)?.0
-            }
+            None => ziputil::stored_data_range(&mut file, header_start)?.0,
         };
-        let file = File::open(path).map_err(FirmwareError::io)?;
-        let window = FileWindow::new(file, start, inner.compressed_size);
-        let mut archive = zip::ZipArchive::new(window).map_err(ziputil::map_zip)?;
+        let window = FileWindow::new(file, start, compressed);
+        let mut inner_archive = ZipArchive::new(window).map_err(ziputil::map_zip)?;
         finish_inner(
-            &mut archive,
+            &mut inner_archive,
             &InnerJob {
                 output_dir,
                 aliases: &aliases,
                 devices: &devices,
                 filename_codename,
-                expected_codename,
-                device_timestamp,
-                device_security_patch,
+                device,
                 outer_meta: outer_meta.as_deref(),
                 inner_zip_bytes: 0,
             },
@@ -84,19 +94,27 @@ pub fn extract_factory(
         std::fs::create_dir_all(output_dir).map_err(FirmwareError::io)?;
         space::ensure_free_space(output_dir, working_need(inner.size, MAX_IMAGE))?;
         let temp = ziputil::temp_inner(output_dir);
-        stream_index(path, inner.index, &temp)?;
-        let _remove = RemoveFile(temp.clone());
-        let mut archive = ziputil::open_zip(&temp)?;
+        let mut output = ziputil::create_output(&temp)?;
+        let _remove = RemoveFile(temp);
+        let index = inner.index;
+        let declared = inner.size;
+        {
+            let mut entry = archive.by_index(index).map_err(ziputil::map_zip)?;
+            ziputil::copy_capped(&mut entry, &mut output, MAX_INNER_ZIP, INNER_TOO_BIG)?;
+            if declared > 0 && output.metadata().map_err(FirmwareError::io)?.len() != declared {
+                return Err(FirmwareError::Truncated);
+            }
+        }
+        output.seek(SeekFrom::Start(0)).map_err(FirmwareError::io)?;
+        let mut inner_archive = ZipArchive::new(output).map_err(ziputil::map_zip)?;
         finish_inner(
-            &mut archive,
+            &mut inner_archive,
             &InnerJob {
                 output_dir,
                 aliases: &aliases,
                 devices: &devices,
                 filename_codename,
-                expected_codename,
-                device_timestamp,
-                device_security_patch,
+                device,
                 outer_meta: outer_meta.as_deref(),
                 inner_zip_bytes: inner.size,
             },
@@ -109,19 +127,17 @@ struct InnerJob<'a> {
     aliases: &'a AliasTable,
     devices: &'a DeviceTable,
     filename_codename: &'a str,
-    expected_codename: Option<&'a str>,
-    device_timestamp: Option<u64>,
-    device_security_patch: Option<&'a str>,
+    device: &'a DeviceFacts,
     outer_meta: Option<&'a str>,
     inner_zip_bytes: u64,
 }
 
-fn finish_inner<R: std::io::Read + std::io::Seek>(
-    archive: &mut zip::ZipArchive<R>,
+fn finish_inner<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
     job: &InnerJob<'_>,
 ) -> Result<FactoryImage, FirmwareError> {
-    let inner_entries = list_archive(archive)?;
-    let inner_text = text_from_archive(archive, &inner_entries, |name| {
+    let inner_entries = ziputil::list_archive(archive)?;
+    let inner_text = text_named(archive, &inner_entries, |name| {
         ziputil::base_name(name) == "android-info.txt"
     })?;
     let meta = choose_meta(job.outer_meta, inner_text.as_deref());
@@ -135,10 +151,9 @@ fn finish_inner<R: std::io::Read + std::io::Seek>(
         job.aliases,
         job.filename_codename,
         &stated,
-        job.expected_codename,
+        &job.device.codename,
     )?;
     check::reject_region(&codename)?;
-    check::downgrade_ok(&meta, job.device_timestamp, job.device_security_patch)?;
     let names = image_names(&inner_entries);
     let partition = select::select_partition(&names, job.devices.has_init_boot(&codename))?;
     let image_entry = inner_entries
@@ -146,9 +161,7 @@ fn finish_inner<R: std::io::Read + std::io::Seek>(
         .find(|entry| ziputil::base_name(&entry.name) == partition.file_name())
         .ok_or(FirmwareError::NoBootImage)?;
     if image_entry.size > MAX_IMAGE {
-        return Err(FirmwareError::Archive(
-            "the image is larger than Flashwright will extract".into(),
-        ));
+        return Err(FirmwareError::Archive(IMAGE_TOO_BIG.into()));
     }
     std::fs::create_dir_all(job.output_dir).map_err(FirmwareError::io)?;
     space::ensure_free_space(
@@ -156,16 +169,30 @@ fn finish_inner<R: std::io::Read + std::io::Seek>(
         working_need(job.inner_zip_bytes, image_entry.size),
     )?;
     let image_path = job.output_dir.join(partition.file_name());
-    let mut entry = archive
-        .by_index(image_entry.index)
-        .map_err(ziputil::map_zip)?;
-    if let Err(err) = ziputil::stream_entry(&mut entry, &image_path) {
-        let _ = std::fs::remove_file(&image_path);
-        return Err(err);
-    }
-    drop(entry);
-    let checked =
-        check::check_extracted_image(&image_path, partition, &meta, None, Some(image_entry.size))?;
+    let mut output = ziputil::create_output(&image_path)?;
+    let copy_result = (|| {
+        let mut entry = archive
+            .by_index(image_entry.index)
+            .map_err(ziputil::map_zip)?;
+        ziputil::copy_capped(&mut entry, &mut output, MAX_IMAGE, IMAGE_TOO_BIG)?;
+        output.seek(SeekFrom::Start(0)).map_err(FirmwareError::io)?;
+        check::check_image_file(
+            &mut output,
+            partition,
+            &meta,
+            None,
+            Some(image_entry.size),
+            job.device,
+        )
+    })();
+    let checked = match copy_result {
+        Ok(checked) => checked,
+        Err(err) => {
+            drop(output);
+            let _ = std::fs::remove_file(&image_path);
+            return Err(err);
+        }
+    };
     Ok(FactoryImage {
         codename,
         partition,
@@ -216,70 +243,22 @@ fn tables() -> Result<(AliasTable, DeviceTable), FirmwareError> {
     Ok((aliases, devices))
 }
 
-fn read_named_text(
-    path: &Path,
+fn text_named<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
     entries: &[ListedEntry],
     pred: impl Fn(&str) -> bool,
 ) -> Result<Option<String>, FirmwareError> {
     let Some(entry) = entries.iter().find(|entry| pred(&entry.name)) else {
         return Ok(None);
     };
-    let mut archive = ziputil::open_zip(path)?;
-    let mut file = archive.by_index(entry.index).map_err(ziputil::map_zip)?;
-    read_capped(&mut file, entry.size)
-}
-
-fn text_from_archive<R: std::io::Read + std::io::Seek>(
-    archive: &mut zip::ZipArchive<R>,
-    entries: &[ListedEntry],
-    pred: impl Fn(&str) -> bool,
-) -> Result<Option<String>, FirmwareError> {
-    let Some(entry) = entries.iter().find(|entry| pred(&entry.name)) else {
-        return Ok(None);
-    };
-    let mut file = archive.by_index(entry.index).map_err(ziputil::map_zip)?;
-    read_capped(&mut file, entry.size)
-}
-
-fn read_capped<R: std::io::Read>(
-    entry: &mut zip::read::ZipFile<'_, R>,
-    size: u64,
-) -> Result<Option<String>, FirmwareError> {
-    const CAP: u64 = 1024 * 1024;
-    if size > CAP {
-        return Err(FirmwareError::Archive(
-            "a metadata entry is too large".into(),
-        ));
+    if entry.size > MAX_METADATA {
+        return Err(FirmwareError::Archive(META_TOO_BIG.into()));
     }
-    let mut text = String::new();
-    std::io::Read::read_to_string(entry, &mut text).map_err(ziputil::map_read)?;
+    let mut file = archive.by_index(entry.index).map_err(ziputil::map_zip)?;
+    let bytes = ziputil::read_limited(&mut file, entry.size, MAX_METADATA, META_TOO_BIG)?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| FirmwareError::Archive("a metadata entry could not be read".into()))?;
     Ok(Some(text))
-}
-
-fn list_archive<R: std::io::Read + std::io::Seek>(
-    archive: &mut zip::ZipArchive<R>,
-) -> Result<Vec<ListedEntry>, FirmwareError> {
-    let mut out = Vec::new();
-    for index in 0..archive.len() {
-        let entry = archive.by_index(index).map_err(ziputil::map_zip)?;
-        out.push(ListedEntry {
-            index,
-            name: ziputil::entry_name(&entry)?,
-            size: entry.size(),
-            compressed_size: entry.compressed_size(),
-            compression: entry.compression(),
-            data_start: entry.data_start(),
-            header_start: entry.header_start(),
-            is_dir: entry.is_dir(),
-        });
-    }
-    Ok(out)
-}
-
-fn stream_index(path: &Path, index: usize, dest: &Path) -> Result<(), FirmwareError> {
-    let mut archive = ziputil::open_zip(path)?;
-    let mut entry = archive.by_index(index).map_err(ziputil::map_zip)?;
-    ziputil::stream_entry(&mut entry, dest)
 }
 
 struct RemoveFile(PathBuf);

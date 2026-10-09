@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sideload uses a 900 second quiet window after a progress percent, and a 300 second watchdog before that.
 - `xtask lint-spawn` scans `apps/` as well as the crates, and it rejects an aliased `Command::new` and `#[expect(clippy::disallowed_methods)]` outside the spawn module.
 
+### Fixed
+
+- A factory or OTA package is hashed and extracted from the open file. The published SHA-256 is required. The phone codename, build date, and security patch come from the scanned phone. The image security patch is read from the boot header, and the build date from `build.prop` when that file is present. A value that cannot be read is acknowledged. It is not skipped and it is not a hard block. A codename outside the device table is refused.
+
 ### Added
 
 - The update wizard confirms a plan once from the review step. The window shell grants one capability, and sample phones stay out of the release bundle. Each write is checked with the safety gates before it runs.
