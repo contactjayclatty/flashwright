@@ -6,7 +6,7 @@ Portions derived from PixelFlasher, Copyright badabing2005, AGPL-3.0-or-later, h
 
 ## Reuse log
 
-The rows below are rewritten behaviour, not copied PixelFlasher source. Crate licences are listed in `docs/THIRD_PARTY.md`.
+M1 through M4 reimplement the behaviour listed below in new code. They do not copy PixelFlasher source. Crate licences are listed in `docs/THIRD_PARTY.md`.
 
 | Item | Upstream source (URL, path, commit) | Licence | Where used | Notes |
 | --- | --- | --- | --- | --- |
@@ -20,7 +20,16 @@ The rows below are rewritten behaviour, not copied PixelFlasher source. Crate li
 | Root and Magisk | `phone.py` lines 3706–3728, 936–966, and 2977–2999, same commit | AGPL-3.0-or-later | `flashwright-device` | `su -c id`, `magisk -v`/`-V`, dumpsys package. Rewritten. |
 | Reboot and wait | `phone.py` lines 4101–4300, 4448–4483, and 4413, same commit | AGPL-3.0-or-later | `flashwright-device` | §3.5 waits. A missing poll is not an unplug. Rewritten. |
 | Command catalogue and write confirm | Behaviour only, same commit | AGPL-3.0-or-later | `flashwright-core` | Typed argv, timeouts, and parsers. Rewritten. The confirm path mints its token inside the core crate. |
+| App-method patch script | `pf_modules.py` `patch_magisk_script` lines 2698–2939, same commit | AGPL-3.0-or-later | `flashwright-magisk` `fl_patch.sh` | Behaviour rewritten. The phone script sets `KEEPVERITY`, `KEEPFORCEENCRYPT`, and `RECOVERYMODE=false`, runs the user's `boot_patch.sh` with the user's busybox, and prints three `FL_` lines. The upstream `[ -f"` typo is not reproduced. Magisk's `boot_patch.sh` is not shipped. |
+| App versus rooted method | `pf_modules.py` `patch_boot_img` lines 4783–4906, same commit | AGPL-3.0-or-later | `flashwright-magisk` | The Magisk app path is the one this build plans. UI Automator and a user-supplied APK are not offered. |
+| Hidden Magisk app | `pf_modules.py` `magisk_not_found` lines 3687–3749, same commit | AGPL-3.0-or-later | `flashwright-magisk` | Rewritten. The product sentence is "Hidden or renamed Magisk app isn't supported yet". Flashwright does not offer to install Magisk. |
+| Magisk | Magisk app, GPL-3.0, https://github.com/topjohnwu/Magisk | GPL-3.0 | Not shipped | The Magisk app is GPL-3.0 and is not shipped. Flashwright uses the copy already installed on the phone. |
+| Magisk component extract | `runtime.py` `extract_magiskboot` lines 8702–8732, same commit | AGPL-3.0-or-later | `flashwright-magisk` | Translated to the `zip` crate. The upstream 7-Zip invocation is not used. Busybox and magiskboot stay inside the user's app. |
+| Stock SHA-1 | `runtime.py` `sha1` lines 3198–3211, same commit | AGPL-3.0-or-later | `flashwright-magisk` | Host SHA-1 of the stock image, via the `sha1` crate. |
+| Patched image check | `pf_modules.py` lines 5020–5119, same commit | AGPL-3.0-or-later | `flashwright-bootimg` | Read-only parser. It reads a v3 or v4 init_boot header, decompresses the ramdisk, requires Magisk's `init` and `.backup/.magisk`, and compares `SHA1=` with the stock image. It does not run magiskboot. `runtime.py` `extract_sha1` lines 3037–3058 and `compare_sha1` lines 3064–3098 are not ported. |
+| UI Automator | `pf_modules.py` `drive_magisk` lines 1807–1809, same commit | AGPL-3.0-or-later | Not used | The upstream function returns immediately. It is not ported. |
 | Device alias table | Upstream issue 325, marked unverified | — | `data/device_aliases.toml` | `eos` maps to `aurora`. |
+| Device fixture rows | Not copied | — | `data/devices.toml` | Three public fixture rows (shiba, oriole, komodo). The seeded safety tables are in the section below. |
 | Package selection | `pf_modules.py` `select_firmware` lines 598–664, same commit | AGPL-3.0-or-later | `flashwright-firmware` | Zip only. Package SHA-256, filename fragment, and codename token. Rewritten. |
 | Factory and OTA open | `pf_modules.py` `process_file` from line 670, payload branch around 812, extract 971–1147, same commit | AGPL-3.0-or-later | `flashwright-firmware` | Factory image zip and full OTA `payload.bin`. Prefer `init_boot` over `boot`. Rewritten. Not ported: 7-Zip, Samsung/Odin, custom ROM, database cache, extra images, or the Python payload extractor. |
 | Chunked SHA-256 | `runtime.py` lines 3217–3228, same commit | AGPL-3.0-or-later | `flashwright-firmware` | Chunked package hash. Rewritten. This tree uses a 1 MiB buffer. |
@@ -29,13 +38,84 @@ The rows below are rewritten behaviour, not copied PixelFlasher source. Crate li
 | payload_dumper | https://github.com/vm03/payload_dumper — path: none copied — commit `2f0a964b8b77c6244e3e12735f85539c938f9c97` | No licence | Not used | Not used (no licence) |
 | AOSP update metadata | https://android.googlesource.com/platform/system/update_engine path `update_metadata.proto` commit `dc84c2552b2d4cf00d2a843cb1c091d99d0499f1`. SHA-256 `09da1556e3edb9197ca88103b22ea07230a634c004605d4aa1efee6a6ed6e60d`. Copy: `third_party/aosp/update_engine/`. | Apache-2.0 | `flashwright-firmware` | Bindings are generated at build time. The payload partition hash is read from this copy. |
 | AOSP AVB footer | https://android.googlesource.com/platform/external/avb commit `761178607206f4cb2af79ed9eec52d8cbd814adb`. Notice: `third_party/aosp/avb/NOTICE`. | MIT | `flashwright-firmware` | Footer, vbmeta header, and property descriptors, matching `avbtool info_image`. No avbtool source is copied. Signature checks are not done. |
-| busybox | No copy in this repository. Fetched at runtime from the user's own root app. | GPL-2.0 | Not bundled | Fetched at runtime and not bundled (GPL-2.0) |
+| busybox | No copy in this repository. Taken from the user's Magisk app (app method) or the user's root install. | GPL-2.0 | Not bundled | Fetched at runtime and not bundled (GPL-2.0) |
 | Upstream certificates, icons, and third-party logos | None | — | Not used | No upstream certificates, icons, or third-party logos are reused |
 | Tauri, including `tauri` 2.12.2, `tauri-build` 2.7.1, `tauri-plugin-dialog` 2.8.1, `tauri-plugin-opener` 2.7.0, and `@tauri-apps/api` 2.12.2 | https://github.com/tauri-apps/tauri | Apache-2.0 OR MIT | `apps/flashwright-gui` | Used as the window shell. No upstream application code was copied. |
 | serde 1.0.229, serde_json 1.0.151, serde_jcs 0.1.0 (https://github.com/l1h3r/serde_jcs), sha2 0.10.9, hex 0.4.3, thiserror 2.0.21, uuid 1.11.0 | crates.io packages of the same names | MIT OR Apache-2.0 | `crates/flashwright-core` | Plan hashing uses JCS via `serde_jcs`. The workspace pins uuid 1.11.0 so the 1.88 toolchain can build it. |
 | IBM Plex Sans and IBM Plex Mono (OFL-1.1) | https://github.com/IBM/plex commit `763c36ef9117782905ae010056dfbe8fd2653a25`, files under `packages/plex-sans/fonts/complete/woff2` and `packages/plex-mono/fonts/complete/woff2` | SIL Open Font License 1.1 | `apps/flashwright-gui/ui/theme/fonts` | “Plex” is a Reserved Font Name and the family name is unchanged. |
 | Vite 6.4.4 and TypeScript | https://github.com/vitejs/vite and https://github.com/microsoft/TypeScript | MIT (Vite), Apache-2.0 (TypeScript) | Wizard bundle tooling | Dev and build tooling only. |
-| Flashwright UI skin | Original sheet supplied for this product (`flashwright-ui.css`) | AGPL-3.0-or-later, with the repository | `apps/flashwright-gui/ui/theme` | Original Clatty Works skin. Not a third-party logo. |
+| Flashwright UI skin | Original sheet supplied for this product (`flashwright-ui.css`) | AGPL-3.0-or-later, with the repository | `apps/flashwright-gui/ui/theme` and `assets/brand/flashwright` | Clatty Works brand assets (in-house) |
+
+### Brand asset files
+
+Clatty Works brand assets (in-house). Each file under `assets/brand/flashwright`:
+
+- `assets/brand/flashwright/app-icon/app-icon-16.png`
+- `assets/brand/flashwright/app-icon/app-icon-16.svg`
+- `assets/brand/flashwright/app-icon/app-icon-24.svg`
+- `assets/brand/flashwright/app-icon/app-icon-256.png`
+- `assets/brand/flashwright/app-icon/app-icon-32.png`
+- `assets/brand/flashwright/app-icon/app-icon-48.png`
+- `assets/brand/flashwright/app-icon/app-icon-512.png`
+- `assets/brand/flashwright/app-icon/app-icon.ico`
+- `assets/brand/flashwright/app-icon/app-icon.svg`
+- `assets/brand/flashwright/banner/wizard-banner@2x.png`
+- `assets/brand/flashwright/banner/wizard-banner.png`
+- `assets/brand/flashwright/banner/wizard-banner.svg`
+- `assets/brand/flashwright/flashwright-assets-sheet.png`
+- `assets/brand/flashwright/flashwright-ui.css`
+- `assets/brand/flashwright/icons/backup-16.png`
+- `assets/brand/flashwright/icons/backup-16.svg`
+- `assets/brand/flashwright/icons/backup-32.png`
+- `assets/brand/flashwright/icons/backup-32.svg`
+- `assets/brand/flashwright/icons/download-16.png`
+- `assets/brand/flashwright/icons/download-16.svg`
+- `assets/brand/flashwright/icons/download-32.png`
+- `assets/brand/flashwright/icons/download-32.svg`
+- `assets/brand/flashwright/icons/flash-16.png`
+- `assets/brand/flashwright/icons/flash-16.svg`
+- `assets/brand/flashwright/icons/flash-32.png`
+- `assets/brand/flashwright/icons/flash-32.svg`
+- `assets/brand/flashwright/icons/help-16.png`
+- `assets/brand/flashwright/icons/help-16.svg`
+- `assets/brand/flashwright/icons/help-32.png`
+- `assets/brand/flashwright/icons/help-32.svg`
+- `assets/brand/flashwright/icons/log-16.png`
+- `assets/brand/flashwright/icons/log-16.svg`
+- `assets/brand/flashwright/icons/log-32.png`
+- `assets/brand/flashwright/icons/log-32.svg`
+- `assets/brand/flashwright/icons/phone-connect-16.png`
+- `assets/brand/flashwright/icons/phone-connect-16.svg`
+- `assets/brand/flashwright/icons/phone-connect-32.png`
+- `assets/brand/flashwright/icons/phone-connect-32.svg`
+- `assets/brand/flashwright/icons/root-16.png`
+- `assets/brand/flashwright/icons/root-16.svg`
+- `assets/brand/flashwright/icons/root-32.png`
+- `assets/brand/flashwright/icons/root-32.svg`
+- `assets/brand/flashwright/icons/settings-16.png`
+- `assets/brand/flashwright/icons/settings-16.svg`
+- `assets/brand/flashwright/icons/settings-32.png`
+- `assets/brand/flashwright/icons/settings-32.svg`
+- `assets/brand/flashwright/icons/success-16.png`
+- `assets/brand/flashwright/icons/success-16.svg`
+- `assets/brand/flashwright/icons/success-32.png`
+- `assets/brand/flashwright/icons/success-32.svg`
+- `assets/brand/flashwright/icons/warning-16.png`
+- `assets/brand/flashwright/icons/warning-16.svg`
+- `assets/brand/flashwright/icons/warning-32.png`
+- `assets/brand/flashwright/icons/warning-32.svg`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal-1600.png`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal-800.png`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal-on-deep-teal-1600.png`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal-on-deep-teal-800.png`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal-on-deep-teal.svg`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal-on-white-1600.png`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal-on-white-800.png`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal-on-white.svg`
+- `assets/brand/flashwright/lockup/flashwright-lockup-horizontal.svg`
+- `assets/brand/flashwright/src/build.py`
+- `assets/brand/flashwright/src/lockup.py`
+- `assets/brand/flashwright/src/pixels.py`
 
 ## Safety tables
 

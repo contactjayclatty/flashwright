@@ -3,6 +3,8 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "0 6 * * *"
 
 jobs:
   test:
@@ -51,3 +53,32 @@ jobs:
       - name: Window keyboard checks
         working-directory: apps/flashwright-gui/ui
         run: npm ci && npm test
+
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
+      - name: C++ toolchain for libFuzzer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++
+          sudo update-alternatives --set cc /usr/bin/gcc
+          sudo update-alternatives --set c++ /usr/bin/g++
+      - name: Fuzz the boot image parser
+        working-directory: crates/flashwright-bootimg
+        env:
+          FUZZ_EVENT: ${{ github.event_name }}
+        run: |
+          LIMIT=15
+          if [ "$FUZZ_EVENT" = "schedule" ]; then
+            LIMIT=300
+          fi
+          cargo +nightly fuzz run inspect -- -max_total_time="$LIMIT" -rss_limit_mb=512
+          cargo +nightly fuzz run header -- -max_total_time="$LIMIT" -rss_limit_mb=512
+          cargo +nightly fuzz run cpio -- -max_total_time="$LIMIT" -rss_limit_mb=512

@@ -1,11 +1,38 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Clatty Works
 
-//! Step list for preparing a Magisk patch. This crate does not run commands.
+//! Magisk app patch plan.
+//!
+//! This crate does not spawn processes and does not mint write tokens.
+//! [`plan_app_patch`] builds a catalogue plan. The session confirms it.
+
+mod cache;
+mod extract;
+mod gates;
+mod image;
+mod pc;
+mod plan;
+
+pub use cache::{offer, store, PatchCacheMeta};
+pub use extract::{extract_apk_components, DeviceAbi, ExtractedComponent};
+pub use gates::{
+    check_device_space, check_magisk_version, check_patched_sha1, check_region, data_free_bytes,
+    embedded_known_bad, komodo_has_init_boot, patch_partition, KOMODO, LATE_SPL,
+    MIN_CODE_FOR_LATE_SPL,
+};
+pub use image::{ExtractedBootImage, SyntheticInitBoot};
+pub use pc::{
+    accept_patch_pull, validate_patched_init_boot, PatchAcceptance, PatchPull, PatchedCheck,
+};
+pub use plan::{
+    components_from_extract, detection_log, official_base_apk, phone_version_code, plan_app_patch,
+    AppPatchPlan, AppPatchRequest, HostComponent,
+};
 
 use thiserror::Error;
 
 pub const HIDDEN_APP: &str = "Hidden or renamed Magisk app isn't supported yet";
+pub const MAGISK_PROVENANCE: &str = "The Magisk app is GPL-3.0 and is not shipped. Flashwright uses the copy already installed on the phone.";
 pub const OFFICIAL_PACKAGE: &str = flashwright_core::cmd::MAGISK_PACKAGE;
 const SCRIPT: &str = include_str!("fl_patch.sh");
 
@@ -13,6 +40,33 @@ const SCRIPT: &str = include_str!("fl_patch.sh");
 pub enum MagiskError {
     #[error("{HIDDEN_APP}")]
     HiddenOrRenamed,
+
+    #[error("Komodo patches init_boot, not boot.")]
+    KomodoBoot,
+
+    #[error("The LU0 / FIPS region is off-limits.")]
+    Lu0Fips,
+
+    #[error("Not enough free space in /data for the patch.")]
+    DeviceSpace,
+
+    #[error("The patched image does not match the stock image.")]
+    PatchedSha1,
+
+    #[error("This Magisk version is blocked.")]
+    KnownBad,
+
+    #[error("This Magisk version is too old for this security patch.")]
+    MagiskTooOld,
+
+    #[error("Magisk is not installed.")]
+    NotInstalled,
+
+    #[error("codePath rejected")]
+    CodePathRejected,
+
+    #[error("{0}")]
+    Message(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,16 +85,7 @@ pub fn patch_script() -> &'static str {
 
 /// Official package only. A missing `codePath` for that package stops the plan.
 pub fn require_official_app(dumpsys_package: &str) -> Result<(), MagiskError> {
-    let mentions = dumpsys_package.contains(OFFICIAL_PACKAGE);
-    let code_path = dumpsys_package.lines().any(|line| {
-        let line = line.trim();
-        line.starts_with("codePath=") && line.contains(OFFICIAL_PACKAGE)
-    });
-    if mentions && code_path {
-        Ok(())
-    } else {
-        Err(MagiskError::HiddenOrRenamed)
-    }
+    official_base_apk(dumpsys_package).map(|_| ())
 }
 
 pub fn prepare_steps(dumpsys_package: &str) -> Result<Vec<PatchStep>, MagiskError> {
@@ -62,13 +107,22 @@ mod tests {
     #[test]
     fn hidden_app_writes_nothing() {
         let err = prepare_steps("package:com.example.hidden\n").unwrap_err();
-        assert_eq!(err.to_string(), HIDDEN_APP);
+        assert_eq!(err.to_string(), "Magisk is not installed.");
+        let hidden = prepare_steps("package:io.github.vvb2060.magisk\n").unwrap_err();
+        assert_eq!(hidden.to_string(), HIDDEN_APP);
+        let rejected =
+            prepare_steps("Package [com.topjohnwu.magisk]\n    codePath=/tmp/not-the-app\n")
+                .unwrap_err();
+        assert_eq!(rejected.to_string(), "codePath rejected");
         let ok = prepare_steps(
             "Package [com.topjohnwu.magisk]\n    codePath=/data/app/~~abc==/com.topjohnwu.magisk-xyz\n",
         )
         .unwrap();
         assert!(ok.contains(&PatchStep::RunPatchScript));
         assert!(ok.contains(&PatchStep::RemoveWorkDir));
+        let log = detection_log("package:com.example.hidden\n");
+        assert!(log.starts_with("section 17 detect:"));
+        assert!(log.contains("absent"));
     }
 
     #[test]
@@ -79,5 +133,18 @@ mod tests {
         assert!(script.contains("FL_STOCK_SHA256="));
         assert!(script.contains("FL_OUT="));
         assert!(script.contains("FL_SHA1="));
+        assert!(script.contains("KEEPVERITY=true"));
+        assert!(script.contains("KEEPFORCEENCRYPT=true"));
+        assert!(script.contains("RECOVERYMODE=false"));
+        assert!(script.contains("./boot_patch.sh"));
+        assert!(script.contains("chmod 755"));
+        assert!(!script.contains("[ -f\""));
+        assert!(script.contains("set -eu"));
+        assert!(script.contains("pipefail"));
+        assert!(script.contains("FL_COMPONENTS_OK"));
+        assert!(!script.contains("magiskboot sha1"));
+        let hashed = script.find("sha1sum").expect("stock sha1");
+        let patched = script.find("./boot_patch.sh").expect("boot_patch");
+        assert!(hashed < patched);
     }
 }

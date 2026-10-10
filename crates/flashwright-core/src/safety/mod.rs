@@ -12,10 +12,10 @@ mod tables;
 
 pub use backup::{capture_stock, sha256_hex, BackupSet, BackupState};
 pub use evaluate::{
-    blocking, bootloader_older, dry_run_lines, gate_ids, needs_backup, parse_bootloader,
-    spl_from_build, GateBlock, GateDecision, Severity,
+    blocking, bootloader_older, dry_run_lines, evaluate_step, gate_ids, needs_backup,
+    parse_bootloader, spl_from_build, CollectedFacts, GateBlock, GateDecision, Severity,
 };
-pub(crate) use evaluate::{evaluate, evaluate_acked, evaluate_step, FactEvidence, SafetyFacts};
+pub(crate) use evaluate::{evaluate, evaluate_acked, FactEvidence, SafetyFacts};
 pub use tables::{
     log_ported_items, ported_items, tables, PortedItem, SafetyTables, UPSTREAM_COMMIT,
 };

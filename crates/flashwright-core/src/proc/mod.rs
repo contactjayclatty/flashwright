@@ -25,6 +25,17 @@ pub use forbid::is_forbidden_program;
 pub use lines::StreamLine;
 pub use scripted::{ScriptedResponse, ScriptedRunner};
 pub(crate) use system::SystemRunner;
+pub use system::SystemTools;
+
+/// Name the real runner from library code.
+///
+/// The window constructs a scripted or empty engine today. This reference keeps
+/// the allow-listed spawn path present for a later session that owns it.
+pub(crate) fn keep_system_runner_linked() {
+    let runner = SystemRunner;
+    let run = SystemRunner::run;
+    let _ = (runner, run);
+}
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

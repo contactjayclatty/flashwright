@@ -7,8 +7,8 @@ error[E0603]: struct `SafetyFacts` is private
 note: the struct `SafetyFacts` is defined here
  --> src/safety/mod.rs
   |
-  | pub(crate) use evaluate::{evaluate, evaluate_acked, evaluate_step, FactEvidence, SafetyFacts};
-  |                                                                                  ^^^^^^^^^^^
+  | pub(crate) use evaluate::{evaluate, evaluate_acked, FactEvidence, SafetyFacts};
+  |                                                                   ^^^^^^^^^^^
 
 error[E0599]: no function or associated item named `komodo_ready` found for struct `safety::evaluate::SafetyFacts` in the current scope
  --> tests/compile_fail/komodo_ready.rs:2:57

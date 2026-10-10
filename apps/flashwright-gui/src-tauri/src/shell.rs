@@ -83,23 +83,49 @@ fn display_name(path: tauri_plugin_dialog::FilePath) -> Option<String> {
     })
 }
 
+async fn pick_path(
+    app: &tauri::AppHandle,
+    folder: bool,
+    filter_name: Option<&str>,
+    extensions: &[&str],
+) -> Result<Option<tauri_plugin_dialog::FilePath>, String> {
+    let (tx, mut rx) = tauri::async_runtime::channel(1);
+    let mut builder = app.dialog().file();
+    if let Some(name) = filter_name {
+        builder = builder.add_filter(name, extensions);
+    }
+    if folder {
+        builder.pick_folder(move |picked| {
+            let _ = tx.try_send(picked);
+        });
+    } else {
+        builder.pick_file(move |picked| {
+            let _ = tx.try_send(picked);
+        });
+    }
+    rx.recv()
+        .await
+        .ok_or_else(|| "The file dialog closed.".to_string())
+}
+
 #[tauri::command]
-fn tools_pick_folder(app: tauri::AppHandle, state: State<EngineState>) -> Result<Snapshot, String> {
-    let display = app
-        .dialog()
-        .file()
-        .blocking_pick_folder()
+async fn tools_pick_folder(
+    app: tauri::AppHandle,
+    state: State<'_, EngineState>,
+) -> Result<Snapshot, String> {
+    let display = pick_path(&app, true, None, &[])
+        .await?
         .and_then(display_name);
     snap(&state, |engine| engine.note_tools_folder(display))
 }
 
 #[tauri::command]
-fn tools_import_zip(app: tauri::AppHandle, state: State<EngineState>) -> Result<Snapshot, String> {
-    let display = app
-        .dialog()
-        .file()
-        .add_filter("Zip", &["zip"])
-        .blocking_pick_file()
+async fn tools_import_zip(
+    app: tauri::AppHandle,
+    state: State<'_, EngineState>,
+) -> Result<Snapshot, String> {
+    let display = pick_path(&app, false, Some("Zip"), &["zip"])
+        .await?
         .and_then(display_name);
     snap(&state, |engine| engine.note_tools_zip(display))
 }
@@ -142,15 +168,12 @@ fn back(state: State<'_, EngineState>) -> Result<Snapshot, String> {
 }
 
 #[tauri::command]
-fn pick_firmware(
+async fn pick_firmware(
     app: tauri::AppHandle,
     state: State<'_, EngineState>,
 ) -> Result<FirmwareRef, String> {
-    let picked = app
-        .dialog()
-        .file()
-        .add_filter("Package", &["zip"])
-        .blocking_pick_file()
+    let picked = pick_path(&app, false, Some("Package"), &["zip"])
+        .await?
         .ok_or_else(|| "No package was chosen.".to_string())?;
     let path = picked
         .into_path()

@@ -11,7 +11,9 @@ fn embedded_tables_parse() {
     let devices = DeviceTable::embedded().unwrap();
     assert!(devices.get("shiba").unwrap().has_init_boot);
     assert!(!devices.get("oriole").unwrap().has_init_boot);
-    assert!(devices.get("komodo").unwrap().has_init_boot);
+    let komodo = devices.get("komodo").unwrap();
+    assert_eq!(komodo.model.as_deref(), Some("Pixel 9 Pro XL"));
+    assert!(komodo.has_init_boot);
     let magisk = KnownBadMagisk::embedded().unwrap();
     assert!(magisk.version_codes.contains(&25207));
     let bootloaders = MinBootloaderTable::embedded().unwrap();

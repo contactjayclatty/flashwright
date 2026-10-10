@@ -141,6 +141,14 @@ try {
   const page = await browser.newPage({ viewport: { width: 1024, height: 680 }, deviceScaleFactor: 1 });
 
   await reachReview(page);
+  const dryClass = await page.locator("[data-action='dry-run']").getAttribute("class");
+  if (!dryClass?.split(/\s+/).includes("fw-btn--default")) {
+    throw new Error("Dry run is not the default button on a dry plan");
+  }
+  const flashClass = await page.locator("[data-action='flash']").getAttribute("class");
+  if (flashClass?.split(/\s+/).includes("fw-btn--default")) {
+    throw new Error("Flash is the default button on a dry plan");
+  }
   await openFlash(page);
   await assertDialogCopy(page);
   if ((await page.locator(".fw-app > .fw-window").getAttribute("inert")) === null) {
@@ -221,6 +229,50 @@ try {
   const shortcut = await page.locator("[data-action='confirm-patch']").getAttribute("aria-keyshortcuts");
   if (shortcut !== "Alt+P") {
     throw new Error(`Patch now shortcut is ${shortcut ?? "missing"}`);
+  }
+  await page.locator("[data-action='confirm-patch']").click();
+  await page.locator("[role='alertdialog']").waitFor({ state: "detached" });
+  if ((await phaseOf(page)) !== "firmware") {
+    throw new Error("A patch confirm left the firmware step");
+  }
+  const patchText = await page.locator(".fw-app").innerText();
+  if (patchText.includes("Updated to")) {
+    throw new Error("A patch confirm said the phone was updated");
+  }
+  if (!patchText.includes("Patch ready")) {
+    throw new Error("A patch confirm did not report that the patch is ready");
+  }
+
+  await page.locator("[data-action='next']:not([disabled])").click();
+  await page.locator("[data-phase='review']").waitFor();
+  await page.locator("[data-action='dry-run']").click();
+  await page.locator("[data-action='dry-run']").waitFor({ state: "detached" });
+  const realFlash = await page.locator("[data-action='flash']").getAttribute("class");
+  if (!realFlash?.split(/\s+/).includes("fw-btn--default")) {
+    throw new Error("Flash is not the default button after the dry run");
+  }
+  await page.locator("[data-action='flash']").click();
+  await page.locator("[role='alertdialog']").waitFor();
+  await page.waitForFunction(() => {
+    const button = document.querySelector("[data-action='confirm-run']");
+    return button instanceof HTMLButtonElement && !button.disabled;
+  });
+  await page.locator("[data-action='confirm-run']").click();
+  await page.locator("[data-phase='flash']").waitFor();
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => document.activeElement?.getAttribute("data-action") === "cancel-stop");
+  for (let step = 0; step < 4; step += 1) {
+    await page.keyboard.press("Tab");
+    const action = await page.evaluate(() => document.activeElement?.getAttribute("data-action"));
+    if (action !== "cancel-stop" && action !== "stop-confirm") {
+      throw new Error(`focus left the stop dialog (${action ?? "none"})`);
+    }
+  }
+  await page.locator("[data-action='stop-confirm']").click();
+  await page.locator("[data-phase='done']").waitFor();
+  const finished = await page.locator(".fw-wizard__title").innerText();
+  if (!finished.includes("Updated to")) {
+    throw new Error(`stopping a finished job cleared the result (${finished})`);
   }
 
   const scaled = await browser.newPage({ viewport: { width: 1024, height: 680 }, deviceScaleFactor: 1.5 });

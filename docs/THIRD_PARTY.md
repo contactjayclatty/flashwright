@@ -8,6 +8,8 @@ The safety gates use PixelFlasher's device table, Magisk list, kernel list, boot
 
 PixelFlasher source is not copied. The behaviour rows, and the items that are not used, are in `docs/disclaimer.md`.
 
+The Magisk app patch follows the same PixelFlasher commit. Each reused item is logged in `docs/disclaimer.md`: `pf_modules.py` `patch_magisk_script` (2698–2939), the app-method choice in `patch_boot_img` (4783–4906), `magisk_not_found` (3687–3749), `runtime.py` `extract_magiskboot` (8702–8732), `runtime.py` `sha1` (3198–3211), and the post-patch check in `pf_modules.py` (5020–5119). `extract_sha1`, `compare_sha1`, and `drive_magisk` are not ported. Magisk itself is GPL-3.0 and is not shipped. Flashwright does not run magiskboot. The patched init_boot is checked by the read-only parser in `flashwright-bootimg`.
+
 Factory and full OTA packages are opened with `payload_dumper` 0.8.4 (`local_zip` only). Its Apache-2.0 licence is `third_party/payload-dumper-rust/LICENSE`. That repository has no NOTICE file. The comparison proto under `third_party/payload-dumper-rust/proto/` is not compiled. After comments and whitespace are removed, it matches the AOSP proto except for `InstallOperation.Type` value `ZSTD = 14`.
 
 The compiled proto is `third_party/aosp/update_engine/update_metadata.proto` from `platform/system/update_engine` commit `dc84c2552b2d4cf00d2a843cb1c091d99d0499f1` (SHA-256 `09da1556e3edb9197ca88103b22ea07230a634c004605d4aa1efee6a6ed6e60d`). The boot-image footer reader follows AOSP `external/avb` commit `761178607206f4cb2af79ed9eec52d8cbd814adb` (MIT, `third_party/aosp/avb/NOTICE`). The unlicensed Python `payload_dumper` is not used.
@@ -24,6 +26,8 @@ Versions are the ones resolved in `Cargo.lock` on 9 Oct 2026.
 | toml | 0.8.23 | MIT OR Apache-2.0 |
 | sha2 | 0.10.9 | MIT OR Apache-2.0 |
 | sha1 | 0.10.7 | MIT OR Apache-2.0 |
+| flate2 | 1.1.10 | MIT OR Apache-2.0 |
+| lz4_flex | 0.11.6 | MIT |
 | zip | 9.0.0 | MIT |
 | tracing | 0.1.44 | MIT |
 | libc | 0.2.190 | MIT OR Apache-2.0 |
@@ -36,7 +40,7 @@ Versions are the ones resolved in `Cargo.lock` on 9 Oct 2026.
 | prost-build | 0.14.4 | Apache-2.0 |
 | protoc-bin-vendored | 3.3.0 | Apache-2.0 (bundled `protoc` is BSD-3-Clause) |
 
-`zip` is built with `deflate-flate2-zlib-rs` only.
+`zip` is built with `deflate-flate2-zlib-rs` only. `flate2` in the parser uses the Rust backend. `lz4_flex` is built with `safe-decode`.
 
 ## Update wizard
 
@@ -54,4 +58,4 @@ Versions are the ones resolved in `Cargo.lock` on 9 Oct 2026.
 
 IBM’s licence reserves the font name “Plex”. The files keep the upstream family name.
 
-The wizard skin (`flashwright-ui.css`) is an original Clatty Works sheet shipped with this repository. The icon and banner marks are original. They are not a third-party logo.
+Clatty Works brand assets (in-house). The file list is in `docs/disclaimer.md`. They are not a third-party logo.

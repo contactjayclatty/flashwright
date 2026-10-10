@@ -70,9 +70,9 @@ export interface PlanPreview {
   backup_set_id: string;
   gates: GateView[];
   steps: Step[];
-  prefer_dry_run: boolean;
-  kind?: string;
-  dry_run?: boolean;
+  dry_run: boolean;
+  after_dry_run: string | null;
+  kind: string;
 }
 
 export interface FirmwareReport {
@@ -117,6 +117,7 @@ export interface Notice {
 
 export interface Snapshot {
   phase: Phase;
+  review_kind: string | null;
   tools: { version: string; classification: string; message: string };
   driver: { state: string; message: string };
   devices: DeviceSummary[];

@@ -12,9 +12,10 @@ mod render;
 pub(crate) use newtypes::MAX_BLOCK_LEN;
 pub use newtypes::{
     AssetRef, ByNameRoot, ByteLen, CmdError, DeviceSerial, DumpsysService, FastbootVar, HostRef,
-    ImageRef, PackageName, PropName, ValidatedDevicePath, WorkFile, MAGISK_PACKAGE,
+    ImageRef, PackageName, PropName, PullName, ValidatedDevicePath, VerifiedHostFile, WorkFile,
+    MAGISK_PACKAGE,
 };
-pub use render::{read_argv, sh_quote, write_argv, CatalogueCommand, Rendered, Tool};
+pub use render::{cleanup_argv, read_argv, sh_quote, write_argv, CatalogueCommand, Rendered, Tool};
 
 use serde::{Deserialize, Serialize};
 
@@ -44,7 +45,7 @@ pub enum AdbHostRead {
     Pull {
         serial: DeviceSerial,
         remote: PullRemote,
-        dst_name: String,
+        dst_name: PullName,
     },
 }
 
@@ -164,8 +165,13 @@ pub enum AdbHostWrite {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdbShellWrite {
     MakeWorkDir { serial: DeviceSerial },
-    RemoveWorkDir { serial: DeviceSerial },
     RunPatchScript { serial: DeviceSerial },
+}
+
+/// Fixed cleanup. This is not a write: it only removes the work directory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CleanupCmd {
+    RemoveWorkDir { serial: DeviceSerial },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,9 +269,7 @@ impl WriteCmd {
                 | AdbHostWrite::Sideload { serial, .. },
             ) => serial,
             Self::AdbShell(
-                AdbShellWrite::MakeWorkDir { serial }
-                | AdbShellWrite::RemoveWorkDir { serial }
-                | AdbShellWrite::RunPatchScript { serial },
+                AdbShellWrite::MakeWorkDir { serial } | AdbShellWrite::RunPatchScript { serial },
             ) => serial,
             Self::Su(SuWrite::RunPatchScript { serial }) => serial,
             Self::Fastboot(
@@ -283,6 +287,14 @@ impl WriteCmd {
 
     pub fn uses_adb(&self) -> bool {
         !self.uses_fastboot()
+    }
+}
+
+impl CleanupCmd {
+    pub fn serial(&self) -> &DeviceSerial {
+        match self {
+            Self::RemoveWorkDir { serial } => serial,
+        }
     }
 }
 

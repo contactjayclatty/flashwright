@@ -23,6 +23,7 @@ pub mod wizard;
 pub mod mock;
 
 mod invoke;
+mod listener;
 
 pub use serde;
 pub(crate) use token::ConfirmedPlan;
@@ -117,6 +118,7 @@ pub struct Session<R: CommandRunner> {
 
 impl<R: CommandRunner + ToolInvoker + 'static> Session<R> {
     pub fn new(runner: Arc<R>) -> Result<Self, CoreError> {
+        crate::proc::keep_system_runner_linked();
         Self::with_config(runner, TransportConfig::production())
     }
 
@@ -171,13 +173,16 @@ impl<R: CommandRunner + ToolInvoker + 'static> Session<R> {
         );
         let writes = report.verdict.allows_writes();
         transport.note_tools_verdict(writes);
+        let listener = crate::listener::listener_on_port(DEFAULT_ADB_PORT);
         if writes {
             let adb = crate::exe::platform_tool(&report.adb, &report.files.adb_sha256)
                 .map_err(|err| CoreError::ToolsBlocked(err.to_string()))?;
             let fastboot =
                 crate::exe::platform_tool(&report.fastboot, &report.files.fastboot_sha256)
                     .map_err(|err| CoreError::ToolsBlocked(err.to_string()))?;
-            transport.install_verified(adb, fastboot, None);
+            transport.install_verified(adb, fastboot, listener);
+        } else {
+            transport.note_listener(listener);
         }
         self.transport = Some(transport);
         let _ = self.events.send(EngineEvent::Log {
@@ -249,6 +254,16 @@ impl<R: CommandRunner + ToolInvoker + 'static> Session<R> {
     }
 }
 
+impl Session<crate::proc::SystemTools> {
+    /// A session for a phone on this computer.
+    ///
+    /// The verified adb and fastboot run inside the crate. Writes stay off
+    /// until the platform-tools allow list has per-file hashes and is device-tested.
+    pub fn for_phone() -> Result<Self, CoreError> {
+        Self::new(Arc::new(crate::proc::SystemTools))
+    }
+}
+
 fn verdict_label(verdict: &ToolsVerdict) -> &'static str {
     if verdict.allows_writes() {
         "allowed"
@@ -266,5 +281,64 @@ mod firmware_export {
         let workers = crate::firmware::extraction_workers();
         assert!(workers >= 1);
         assert!(workers <= 4);
+    }
+
+    #[test]
+    fn phone_session_builds_the_verified_runner() {
+        let session = crate::Session::<crate::proc::SystemTools>::for_phone().unwrap();
+        assert!(session.tools().is_none());
+        assert!(!session.allows_writes());
+    }
+
+    #[tokio::test]
+    async fn locate_tools_records_the_adb_listener() {
+        use std::sync::Arc;
+
+        use flashwright_tools::HostKind;
+
+        use crate::proc::{ScriptedResponse, ScriptedRunner};
+
+        let dir = std::env::temp_dir().join(format!("flashwright-listener-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let adb = if cfg!(windows) { "adb.exe" } else { "adb" };
+        let fastboot = if cfg!(windows) {
+            "fastboot.exe"
+        } else {
+            "fastboot"
+        };
+        std::fs::write(dir.join(adb), b"adb").unwrap();
+        std::fs::write(dir.join(fastboot), b"fastboot").unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.on(
+            adb,
+            &["version"],
+            ScriptedResponse::ok("Android Debug Bridge version 1.0.41\nVersion 34.0.4-10449696\n"),
+        );
+        runner.on(
+            fastboot,
+            &["--version"],
+            ScriptedResponse::ok("fastboot version 34.0.4-10449696\n"),
+        );
+        let mut session = crate::Session::new(runner).unwrap();
+        let report = session
+            .locate_tools(&dir, HostKind::current())
+            .await
+            .unwrap();
+        assert!(!report.verdict.allows_writes());
+        let recorded = session
+            .transport
+            .as_ref()
+            .expect("transport")
+            .recorded_listener();
+        let live = crate::listener::listener_on_port(flashwright_tools::DEFAULT_ADB_PORT);
+        assert_eq!(
+            recorded.as_ref().map(|image| image.path.clone()),
+            live.as_ref().map(|image| image.path.clone())
+        );
+        assert_eq!(
+            recorded.as_ref().map(|image| image.sha256.clone()),
+            live.as_ref().map(|image| image.sha256.clone())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

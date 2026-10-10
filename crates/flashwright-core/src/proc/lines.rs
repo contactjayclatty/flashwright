@@ -116,6 +116,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_preset_truncation_flag_stays_set_when_the_chunk_fits() {
+        let mut buf = Vec::new();
+        let mut truncated = true;
+        push_capped(&mut buf, b"ok", &mut truncated);
+        assert!(truncated);
+        assert_eq!(buf, b"ok");
+
+        let mut full = vec![1u8; OUTPUT_CAP];
+        let mut overflow = false;
+        push_capped(&mut full, b"x", &mut overflow);
+        assert!(overflow);
+        assert_eq!(full.len(), OUTPUT_CAP);
+    }
+
+    #[test]
     fn splits_newlines_and_carriage_returns() {
         let mut asm = LineAssembler::default();
         let raw = b"serving: 'a' (~10%)\rserving: 'b' (~100%)\nTotal xfer: 1.00x\r\n";

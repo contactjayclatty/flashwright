@@ -10,7 +10,7 @@ use flashwright_tools::{ToolInvoker, ToolOutput, ToolsError};
 
 use crate::cmd::{read_argv, AdbHostRead, CatalogueCommand, FastbootRead, ReadCmd};
 use crate::exe::measure_platform_tool;
-use crate::proc::{CommandRunner, RunLimits, ScriptedRunner, SystemRunner};
+use crate::proc::{CommandRunner, RunLimits, ScriptedRunner, SystemRunner, SystemTools};
 
 impl ToolInvoker for ScriptedRunner {
     async fn invoke(
@@ -20,6 +20,17 @@ impl ToolInvoker for ScriptedRunner {
         detached: bool,
     ) -> Result<ToolOutput, ToolsError> {
         run_tool(self, program, args, detached).await
+    }
+}
+
+impl ToolInvoker for SystemTools {
+    async fn invoke(
+        &self,
+        program: &Path,
+        args: &[String],
+        detached: bool,
+    ) -> Result<ToolOutput, ToolsError> {
+        SystemRunner.invoke(program, args, detached).await
     }
 }
 

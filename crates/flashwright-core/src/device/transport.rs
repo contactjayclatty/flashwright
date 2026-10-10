@@ -44,12 +44,14 @@ pub struct PlatformToolsTransport<R: CommandRunner> {
     active: Arc<Mutex<Option<ArmedRun>>>,
     verified: Arc<Mutex<Option<VerifiedTools>>>,
     writes_allowed: Arc<Mutex<bool>>,
+    listener: Arc<Mutex<Option<crate::exe::ListenerImage>>>,
 }
 
 struct VerifiedTools {
     adb: VerifiedExe,
     fastboot: VerifiedExe,
     listener: Option<crate::exe::ListenerImage>,
+    libraries: Vec<(PathBuf, String)>,
 }
 
 impl<R: CommandRunner> Clone for PlatformToolsTransport<R> {
@@ -62,6 +64,7 @@ impl<R: CommandRunner> Clone for PlatformToolsTransport<R> {
             active: Arc::clone(&self.active),
             verified: Arc::clone(&self.verified),
             writes_allowed: Arc::clone(&self.writes_allowed),
+            listener: Arc::clone(&self.listener),
         }
     }
 }
@@ -81,6 +84,7 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
             active: Arc::new(Mutex::new(None)),
             verified: Arc::new(Mutex::new(None)),
             writes_allowed: Arc::new(Mutex::new(false)),
+            listener: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -100,11 +104,24 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         fastboot: VerifiedExe,
         listener: Option<crate::exe::ListenerImage>,
     ) {
+        *self.listener.lock().expect("adb listener") = listener.clone();
+        let libraries = sibling_libraries(&[adb.path(), fastboot.path()]);
         *self.verified.lock().expect("verified tools") = Some(VerifiedTools {
             adb,
             fastboot,
             listener,
+            libraries,
         });
+    }
+
+    /// Remember the adb server image even when writes stay off.
+    pub(crate) fn note_listener(&self, listener: Option<crate::exe::ListenerImage>) {
+        *self.listener.lock().expect("adb listener") = listener;
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn recorded_listener(&self) -> Option<crate::exe::ListenerImage> {
+        self.listener.lock().expect("adb listener").clone()
     }
 
     /// A directory watcher calls this when a managed platform-tools file changes.
@@ -131,22 +148,25 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         let Some(tools) = guard.as_ref() else {
             return (false, false, false);
         };
-        let paths = vec![
-            tools.adb.path().to_path_buf(),
-            tools.fastboot.path().to_path_buf(),
-        ];
+        let paths = locked_tool_paths(tools);
         let unchanged = match crate::exe::SharedReadLocks::hold(&paths) {
             Ok(mut locks) => match locks.hashes() {
-                Ok(hashes) => {
-                    hashes.first().map(String::as_str) == Some(tools.adb.sha256())
-                        && hashes.get(1).map(String::as_str) == Some(tools.fastboot.sha256())
-                }
+                Ok(hashes) => tool_hashes_match(&hashes, tools),
                 Err(_) => false,
             },
             Err(_) => false,
         };
         let server = adb_server_matches(&tools.adb, tools.listener.as_ref()).is_ok();
         (true, unchanged, server)
+    }
+
+    fn armed_plan_hash(&self) -> String {
+        self.active
+            .lock()
+            .expect("armed run")
+            .as_ref()
+            .map(|run| run.plan_hash.clone())
+            .unwrap_or_default()
     }
 
     pub(crate) fn arm(&self, plan: &crate::token::ConfirmedPlan) {
@@ -159,8 +179,14 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
     }
 
     pub async fn run_read(&self, cmd: crate::cmd::ReadCmd) -> Result<RunResult, DeviceError> {
-        let rendered =
+        let mut rendered =
             crate::cmd::read_argv(&cmd).map_err(|err| DeviceError::Message(err.to_string()))?;
+        if let crate::cmd::ReadCmd::AdbHost(crate::cmd::AdbHostRead::Pull { dst_name, .. }) = &cmd {
+            let dest = pull_destination(self.armed_plan_hash(), dst_name.as_str())?;
+            if let Some(last) = rendered.args.last_mut() {
+                *last = dest;
+            }
+        }
         let budget = crate::timeouts::read_budget(&cmd);
         let program = self.program_for(rendered.tool);
         let command = CatalogueCommand::from_rendered(rendered);
@@ -196,6 +222,31 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         result
     }
 
+    /// Remove the fixed work directory. This does not take a write token.
+    ///
+    /// A failed removal is tried once more. The second result is the one returned.
+    pub(crate) async fn run_cleanup(
+        &self,
+        cmd: &crate::cmd::CleanupCmd,
+    ) -> Result<RunResult, DeviceError> {
+        let rendered =
+            crate::cmd::cleanup_argv(cmd).map_err(|err| DeviceError::Message(err.to_string()))?;
+        let budget = crate::timeouts::cleanup_budget();
+        let adb = self.adb.clone();
+        let command = CatalogueCommand::from_rendered(rendered.clone());
+        match self
+            .run_tool(&adb, command, RunLimits::from_budget(&budget))
+            .await
+        {
+            Ok(result) if result.success_exit() => Ok(result),
+            _ => {
+                let command = CatalogueCommand::from_rendered(rendered);
+                self.run_tool(&adb, command, RunLimits::from_budget(&budget))
+                    .await
+            }
+        }
+    }
+
     fn reverify_before_write(
         &self,
         cmd: &crate::cmd::WriteCmd,
@@ -211,18 +262,13 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
                 "G21 blocked: no verified platform-tools are installed".into(),
             ));
         };
-        let paths = vec![
-            tools.adb.path().to_path_buf(),
-            tools.fastboot.path().to_path_buf(),
-        ];
+        let paths = locked_tool_paths(tools);
         let mut locks =
             SharedReadLocks::hold(&paths).map_err(|err| DeviceError::Message(err.to_string()))?;
         let hashes = locks
             .hashes()
             .map_err(|err| DeviceError::Message(err.to_string()))?;
-        if hashes.first().map(String::as_str) != Some(tools.adb.sha256())
-            || hashes.get(1).map(String::as_str) != Some(tools.fastboot.sha256())
-        {
+        if !tool_hashes_match(&hashes, tools) {
             return Err(DeviceError::Message(
                 "platform-tools changed on disk before the write".into(),
             ));
@@ -841,6 +887,10 @@ impl<R: CommandRunner> PlatformToolsTransport<R> {
         limits: RunLimits,
     ) -> Result<RunResult, DeviceError> {
         let exe = self.exe_for(program)?;
+        if exe.trust() != crate::exe::Trust::Scripted {
+            crate::exe::recheck_allow_list(&exe)
+                .map_err(|err| DeviceError::Message(err.to_string()))?;
+        }
         self.runner
             .run(&exe, &command, limits)
             .await
@@ -911,6 +961,25 @@ fn deadline_outcome(mode: Option<Mode>, target: WaitTarget) -> WaitOutcome {
             _ => WaitOutcome::WrongMode { actual },
         },
     }
+}
+
+fn pull_destination(plan_hash: String, name: &str) -> Result<String, DeviceError> {
+    let segment = if plan_segment(&plan_hash) {
+        plan_hash
+    } else {
+        "unplanned".to_string()
+    };
+    let dir = std::env::temp_dir().join("flashwright-plan").join(segment);
+    std::fs::create_dir_all(&dir).map_err(|err| DeviceError::Message(err.to_string()))?;
+    Ok(dir.join(name).to_string_lossy().into_owned())
+}
+
+fn plan_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 80
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
 }
 
 fn command_failed(command: &str, result: &RunResult) -> DeviceError {
@@ -1071,4 +1140,70 @@ fn write_size(cmd: &crate::cmd::WriteCmd) -> u64 {
         },
         _ => 0,
     }
+}
+
+const LIBRARY_NAMES: &[&str] = &["AdbWinApi.dll", "AdbWinUsbApi.dll"];
+
+fn sibling_libraries(exes: &[&Path]) -> Vec<(PathBuf, String)> {
+    let mut found = Vec::new();
+    for exe in exes {
+        let Some(dir) = exe.parent() else {
+            continue;
+        };
+        for name in LIBRARY_NAMES {
+            let path = dir.join(name);
+            if !path.is_file() || found.iter().any(|(existing, _)| existing == &path) {
+                continue;
+            }
+            if let Some(hash) = hash_path(&path) {
+                found.push((path, hash));
+            }
+        }
+    }
+    found.sort_by(|left, right| left.0.cmp(&right.0));
+    found
+}
+
+fn locked_tool_paths(tools: &VerifiedTools) -> Vec<PathBuf> {
+    let mut paths = vec![
+        tools.adb.path().to_path_buf(),
+        tools.fastboot.path().to_path_buf(),
+    ];
+    for (path, _) in &tools.libraries {
+        paths.push(path.clone());
+    }
+    paths
+}
+
+fn tool_hashes_match(hashes: &[String], tools: &VerifiedTools) -> bool {
+    hashes.first().map(String::as_str) == Some(tools.adb.sha256())
+        && hashes.get(1).map(String::as_str) == Some(tools.fastboot.sha256())
+        && tools
+            .libraries
+            .iter()
+            .enumerate()
+            .all(|(index, (_, expected))| {
+                hashes.get(index + 2).map(String::as_str) == Some(expected.as_str())
+            })
+}
+
+fn hash_path(path: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buf).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    Some(hex)
 }

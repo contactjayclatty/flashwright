@@ -103,6 +103,30 @@ fn arm(
 }
 
 #[tokio::test]
+async fn a_scan_refuses_a_hashed_adb_that_is_not_allow_listed() {
+    let runner = Arc::new(ScriptedRunner::new());
+    runner.on(
+        adb_name(),
+        &["devices", "-l"],
+        ScriptedResponse::ok("pixel1 device\n"),
+    );
+    let dir = std::env::temp_dir().join(format!("flashwright-scan-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let adb_path = dir.join(adb_name());
+    std::fs::write(&adb_path, b"not-on-the-allow-list").unwrap();
+    let transport = PlatformToolsTransport::new(
+        Arc::clone(&runner),
+        adb_path,
+        tool_path(fastboot_name()),
+        TransportConfig::for_tests(),
+    );
+    let err = transport.list().await.unwrap_err();
+    assert!(err.to_string().contains("allow-listed"), "{err}");
+    assert!(runner.calls().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn a_mismatched_write_spawns_nothing() {
     let _gate = test_gate().await;
     let runner = Arc::new(ScriptedRunner::new());
@@ -504,6 +528,44 @@ async fn sideload_post_state_reads_stderr() {
         )
         .await
         .unwrap();
+}
+
+#[test]
+fn a_changed_library_fails_the_tool_gate() {
+    let dir = std::env::temp_dir().join(format!(
+        "flashwright-dll-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let adb_path = dir.join(adb_name());
+    let fastboot_path = dir.join(fastboot_name());
+    let dll = dir.join("AdbWinApi.dll");
+    std::fs::write(&adb_path, b"adb-bytes").unwrap();
+    std::fs::write(&fastboot_path, b"fastboot-bytes").unwrap();
+    std::fs::write(&dll, b"dll-v1").unwrap();
+    let adb = platform_tool(&adb_path, &sha256_file(&adb_path)).unwrap();
+    let fastboot = platform_tool(&fastboot_path, &sha256_file(&fastboot_path)).unwrap();
+    let listener = ListenerImage {
+        path: adb_path.clone(),
+        sha256: sha256_file(&adb_path),
+    };
+    let transport = PlatformToolsTransport::new(
+        Arc::new(ScriptedRunner::new()),
+        adb_path,
+        fastboot_path,
+        TransportConfig::for_tests(),
+    );
+    transport.install_verified(adb, fastboot, Some(listener));
+    let (_installed, matched, _server) = transport.tool_gate();
+    assert!(matched);
+    std::fs::write(&dll, b"dll-v2").unwrap();
+    let (_installed, matched, _server) = transport.tool_gate();
+    assert!(!matched);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn sha256_file(path: &std::path::Path) -> String {

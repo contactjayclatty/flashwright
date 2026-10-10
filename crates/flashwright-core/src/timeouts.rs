@@ -34,6 +34,13 @@ struct File {
     push: SizedRow,
     pull: SizedRow,
     patch_script: FixedRow,
+    mkdir: SecondsRow,
+    cleanup: SecondsRow,
+}
+
+#[derive(Debug, Deserialize)]
+struct SecondsRow {
+    timeout_s: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -154,6 +161,13 @@ pub fn write_budget(
         WriteCmd::Fastboot(crate::cmd::FastbootWrite::SetActive { .. }) => {
             (fixed(&file.set_active), file.set_active.watchdog_s)
         }
+        WriteCmd::AdbShell(crate::cmd::AdbShellWrite::MakeWorkDir { .. }) => {
+            return Ok(StepBudget {
+                timeout: Duration::from_secs(file.mkdir.timeout_s),
+                watchdog: None,
+                finalising: None,
+            });
+        }
         WriteCmd::AdbShell(_) | WriteCmd::Su(_) => {
             (fixed(&file.patch_script), file.patch_script.watchdog_s)
         }
@@ -174,6 +188,24 @@ pub fn write_budget(
 
 pub fn sideload_finalising() -> Duration {
     Duration::from_secs(load().sideload.finalising_s)
+}
+
+/// Budget for the fixed work-directory cleanup. It is not a write budget.
+pub fn cleanup_budget() -> StepBudget {
+    let file = load();
+    StepBudget {
+        timeout: Duration::from_secs(file.cleanup.timeout_s),
+        watchdog: None,
+        finalising: None,
+    }
+}
+
+pub fn mkdir_budget() -> StepBudget {
+    StepBudget {
+        timeout: Duration::from_secs(load().mkdir.timeout_s),
+        watchdog: None,
+        finalising: None,
+    }
 }
 
 pub fn pull_budget(size_bytes: u64, multiplier: f64) -> Result<StepBudget, TimeoutError> {
@@ -230,6 +262,23 @@ fn load() -> File {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mkdir_waits_fifteen_seconds_and_cleanup_waits_thirty() {
+        use crate::cmd::{AdbShellWrite, DeviceSerial, WriteCmd};
+        let serial = DeviceSerial::try_from("pixel1").unwrap();
+        let budget = write_budget(
+            &WriteCmd::AdbShell(AdbShellWrite::MakeWorkDir { serial }),
+            0,
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(budget.timeout, Duration::from_secs(15));
+        assert!(budget.watchdog.is_none());
+        assert_eq!(mkdir_budget().timeout, Duration::from_secs(15));
+        assert_eq!(cleanup_budget().timeout, Duration::from_secs(30));
+        assert!(cleanup_budget().watchdog.is_none());
+    }
 
     #[test]
     fn examples_match_the_table() {

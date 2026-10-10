@@ -70,3 +70,6 @@ dist-ssr/
 *.zip
 *.img
 payload.bin
+
+# cargo-fuzz
+fuzz/artifacts/

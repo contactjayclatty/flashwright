@@ -6,12 +6,10 @@
 //! Callers pass a [`crate::exe::VerifiedExe`]. The program path is that
 //! value's absolute path.
 
+use crate::exe::VerifiedExe;
 use std::ffi::OsStr;
 #[cfg(all(test, unix))]
 use std::path::Path;
-use std::process::Stdio;
-
-use crate::exe::VerifiedExe;
 
 /// Build a child command. This is the single `Command::new` call site.
 #[allow(clippy::disallowed_methods)]
@@ -68,6 +66,36 @@ pub(crate) fn command_for(exe: &VerifiedExe) -> tokio::process::Command {
     command(exe.path().as_os_str())
 }
 
+/// The child that [`crate::proc::system::SystemRunner`] spawns.
+///
+/// Linux tests can place `strace` in front of the allow-listed program.
+pub(crate) fn child_command(
+    exe: &VerifiedExe,
+    args: &[String],
+) -> Result<tokio::process::Command, crate::proc::ProcError> {
+    #[cfg(all(test, unix))]
+    if let Some(log) = exec_trace() {
+        let strace = if Path::new("/usr/bin/strace").is_file() {
+            Path::new("/usr/bin/strace")
+        } else {
+            Path::new("/bin/strace")
+        };
+        let mut command = command(strace.as_os_str());
+        command
+            .arg("-e")
+            .arg("trace=execve")
+            .arg("-o")
+            .arg(log)
+            .arg("--")
+            .arg(exe.path())
+            .args(args);
+        return Ok(command);
+    }
+    let mut command = command_for(exe);
+    command.args(args);
+    Ok(command)
+}
+
 /// Quote round-trip helper. Uses the same `command` function as production.
 #[cfg(all(test, unix))]
 pub(crate) fn command_path(program: &Path) -> tokio::process::Command {
@@ -104,12 +132,4 @@ mod quote_tests {
             assert_eq!(lines, chunk);
         }
     }
-}
-
-#[allow(dead_code)]
-pub(crate) fn null_stdio(command: &mut tokio::process::Command) {
-    command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null());
 }

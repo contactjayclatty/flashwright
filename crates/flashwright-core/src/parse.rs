@@ -246,6 +246,29 @@ pub fn parse_push(text: &str) -> Verdict {
     }
 }
 
+/// adb pull prints this when one file arrived.
+pub fn parse_pull(text: &str) -> Verdict {
+    if let Some(verdict) = global_failure(text) {
+        return verdict;
+    }
+    if text.contains("1 file pulled") {
+        Verdict::Ok
+    } else {
+        Verdict::Failed {
+            reason: FailReason::MissingMarker,
+        }
+    }
+}
+
+/// mkdir and rm use fixed paths. Exit 0 is checked by the caller.
+/// A global error line still fails the step.
+pub fn parse_fixed_shell(text: &str) -> Verdict {
+    if let Some(verdict) = global_failure(text) {
+        return verdict;
+    }
+    Verdict::Ok
+}
+
 pub fn parse_patch_script(text: &str) -> Verdict {
     if text.lines().any(|line| line.starts_with("! ")) {
         return Verdict::Failed {
@@ -264,10 +287,15 @@ pub fn parse_patch_script(text: &str) -> Verdict {
         .lines()
         .filter(|line| line.starts_with("FL_STOCK_SHA256="))
         .collect();
+    let components = text
+        .lines()
+        .filter(|line| line.trim() == "FL_COMPONENTS_OK")
+        .count()
+        == 1;
     let out_ok = outs.len() == 1 && outs[0] == "FL_OUT=/data/local/tmp/flashwright/out/patched.img";
     let sha_ok = sha1.len() == 1 && is_hex(&sha1[0]["FL_SHA1=".len()..], 40);
     let stock_ok = stock.len() == 1 && is_hex(&stock[0]["FL_STOCK_SHA256=".len()..], 64);
-    if out_ok && sha_ok && stock_ok {
+    if out_ok && sha_ok && stock_ok && components {
         Verdict::Ok
     } else {
         Verdict::Failed {
@@ -407,6 +435,27 @@ mod tests {
                 reason: FailReason::DeviceMissing
             }
         );
+    }
+
+    #[test]
+    fn pull_needs_one_file_and_the_patch_script_names_its_components() {
+        assert_eq!(parse_pull("1 file pulled.\n"), Verdict::Ok);
+        assert_eq!(
+            parse_pull(""),
+            Verdict::Failed {
+                reason: FailReason::MissingMarker
+            }
+        );
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let stock = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let good = format!(
+            "FL_COMPONENTS_OK\nFL_OUT=/data/local/tmp/flashwright/out/patched.img\nFL_SHA1={sha}\nFL_STOCK_SHA256={stock}\n"
+        );
+        assert_eq!(parse_patch_script(&good), Verdict::Ok);
+        assert!(matches!(
+            parse_patch_script(&good.replacen("FL_COMPONENTS_OK\n", "", 1)),
+            Verdict::Failed { .. }
+        ));
     }
 
     #[test]
